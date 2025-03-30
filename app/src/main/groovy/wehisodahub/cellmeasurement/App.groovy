@@ -8,9 +8,11 @@ import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
 import qupath.lib.objects.hierarchy.PathObjectHierarchy
 import qupath.lib.regions.ImagePlane
+import qupath.lib.io.PathIO.GeoJsonExportOptions
+import qupath.lib.analysis.features.ObjectMeasurements
+import qupath.lib.images.servers.PixelCalibration
 import qupath.imagej.processing.RoiLabeling
 import qupath.imagej.tools.IJTools
-import qupath.lib.io.PathIO.GeoJsonExportOptions
 import java.awt.geom.Point2D
 
 class App {
@@ -79,8 +81,8 @@ class App {
 
     static void main(String[] args) {
         // TODO: better arg parsing
-        if (args.length < 3) {
-            println "Usage: gradlew run --args=\"<wholeCellMaskFilePath> <nuclearMaskFilePath> <outputFilePath>\""
+        if (args.length < 5) {
+            println "Usage: gradlew run --args=\"<wholeCellMaskFilePath> <nuclearMaskFilePath> <outputFilePath> <downsampleFactor> <pixelSizeMicrons>\""
             return
         }
 
@@ -89,6 +91,8 @@ class App {
         def wholeCellMaskFilePath = args[0]
         def nuclearMaskFilePath = args[1]
         def outputFilePath = args[2]
+        def downsampleFactor = args[3].toDouble()
+        def pixelSizeMicrons = args[4].toDouble()
 
         // Load whole cell mask image
         def wholeCellImp = IJ.openImage(wholeCellMaskFilePath)
@@ -99,7 +103,6 @@ class App {
         println "Loaded nuclear mask width: " + nuclearImp.getWidth()
 
         // Extract ROIs from whole cell and nuclear masks
-        def downsampleFactor = 1.0
         def wholeCellROIs = extractROIs(wholeCellImp, downsampleFactor)
         def nuclearROIs = extractROIs(nuclearImp, downsampleFactor)
 
@@ -110,7 +113,25 @@ class App {
         // Convert QuPath ROIs to objects and add them to the hierarchy
         def pathObjects = createCellObjects(wholeCellROIs, nuclearROIs)
         println "Total path objects: " + pathObjects.size()
-         
+
+        // Set the pixel calibration
+        PixelCalibration cal = new PixelCalibration.Builder()
+            .pixelSizeMicrons(pixelSizeMicrons, pixelSizeMicrons)
+            .build()
+
+        // Add cell measurements
+        ObjectMeasurements.addShapeMeasurements(
+            pathObjects,
+            cal,
+            ObjectMeasurements.ShapeFeatures.AREA,
+            ObjectMeasurements.ShapeFeatures.CIRCULARITY,
+            ObjectMeasurements.ShapeFeatures.LENGTH,
+            ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
+            ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
+            ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
+            ObjectMeasurements.ShapeFeatures.SOLIDITY
+        )
+
         // Export the objects to GeoJSON
         QP.exportObjectsToGeoJson(
             pathObjects,
