@@ -13,8 +13,7 @@ import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.images.servers.PixelCalibration
 import qupath.imagej.processing.RoiLabeling
 import qupath.imagej.tools.IJTools
-import qupath.imagej.images.servers.ImageJServerBuilder
-import qupath.lib.images.servers.ImageServerBuilder
+import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 import java.awt.geom.Point2D
 
 class App {
@@ -124,6 +123,7 @@ class App {
         println "Set pixel calibration: " + cal
 
         // Add cell measurements
+        println "Adding cell measurements..."
         ObjectMeasurements.addShapeMeasurements(
             pathObjects,
             cal,
@@ -137,7 +137,9 @@ class App {
         )
 
         // Build a server for intensity measuruements
-        def server = QP.buildServer(tiffFilePath)
+        def uri = new File(tiffFilePath).toURI()
+        def builder = new BioFormatsServerBuilder()
+        def server = builder.buildServer(uri)
 
         // Define measurements
         def measurements = [
@@ -156,6 +158,7 @@ class App {
             ObjectMeasurements.Compartments.NUCLEUS
         ]
 
+        println "Adding intensity measurements..."
         // Add intensity measurements
          pathObjects.each { pathObject ->
             ObjectMeasurements.addIntensityMeasurements(

@@ -37,6 +37,7 @@ dependencies {
     // QuPath dependencies
     implementation 'io.github.qupath:qupath-core:0.5.1'
     implementation 'io.github.qupath:qupath-core-processing:0.5.1'
+    implementation 'io.github.qupath:qupath-extension-bioformats:0.5.1'
 }
 
 testing {
