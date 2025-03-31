@@ -4,7 +4,11 @@
 [versions]
 groovy-all = "3.0.23"
 guava = "33.3.1-jre"
+imagej = "1.54p"
+picocli = "4.7.6"
 
 [libraries]
 groovy-all = { module = "org.codehaus.groovy:groovy-all", version.ref = "groovy-all" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
+imagej = { module = "net.imagej:ij", version.ref = "imagej" }
+picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
