@@ -43,23 +43,21 @@ class App {
     }
 
     static List<PathObject> createCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs) {
-        // TODO: we need to handle the case where the whole cell and nuclear masks
-        // have different numbers of ROIs
-        def matchedPairs = matchROIs(wholeCellROIs, nuclearROIs)
-        return matchedPairs.collect { cell, nucleus ->
+        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs)
+        return matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
             }
         }.findAll { it != null }
     }
 
-    static List<List<ROI>> matchROIs(List<ROI> wholeCellROIs, List<ROI> nuclearROIs) {
+    static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs) {
         def matchedPairs = []
 
-        wholeCellROIs.each { cellROI ->
-            def cellCentroid = new Point2D.Double(cellROI.getCentroidX(), cellROI.getCentroidY())
-            def nearestNucleus = findNearestROI(cellCentroid, nuclearROIs)
-            matchedPairs << [cellROI, nearestNucleus]
+        nuclearROIs.each { nuclearROI ->
+            def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
+            def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs)
+            matchedPairs << [nuclearROI, nearestCell]
         }
 
         return matchedPairs
@@ -68,11 +66,12 @@ class App {
     static ROI findNearestROI(Point2D centroid, List<ROI> rois) {
         ROI nearestROI = null
         double minDistance = Double.MAX_VALUE
+        double distThreshold = 10.0 // TODO: make this a parameter
 
         rois.each { roi ->
             def roiCentroid = new Point2D.Double(roi.getCentroidX(), roi.getCentroidY())
             double distance = centroid.distance(roiCentroid)
-            if (distance < minDistance) {
+            if (distance < minDistance && distance < distThreshold) {
                 minDistance = distance
                 nearestROI = roi
             }
