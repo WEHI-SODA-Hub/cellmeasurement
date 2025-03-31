@@ -13,6 +13,8 @@ import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.images.servers.PixelCalibration
 import qupath.imagej.processing.RoiLabeling
 import qupath.imagej.tools.IJTools
+import qupath.imagej.images.servers.ImageJServerBuilder
+import qupath.lib.images.servers.ImageServerBuilder
 import java.awt.geom.Point2D
 
 class App {
@@ -81,8 +83,8 @@ class App {
 
     static void main(String[] args) {
         // TODO: better arg parsing
-        if (args.length < 5) {
-            println "Usage: gradlew run --args=\"<wholeCellMaskFilePath> <nuclearMaskFilePath> <outputFilePath> <downsampleFactor> <pixelSizeMicrons>\""
+        if (args.length < 6) {
+            println "Usage: gradlew run --args=\"<wholeCellMaskFilePath> <nuclearMaskFilePath> <tiffFilePath> <outputFilePath> <downsampleFactor> <pixelSizeMicrons>\""
             return
         }
 
@@ -90,9 +92,10 @@ class App {
         // Input file paths
         def wholeCellMaskFilePath = args[0]
         def nuclearMaskFilePath = args[1]
-        def outputFilePath = args[2]
-        def downsampleFactor = args[3].toDouble()
-        def pixelSizeMicrons = args[4].toDouble()
+        def tiffFilePath = args[2]
+        def outputFilePath = args[3]
+        def downsampleFactor = args[4].toDouble()
+        def pixelSizeMicrons = args[5].toDouble()
 
         // Load whole cell mask image
         def wholeCellImp = IJ.openImage(wholeCellMaskFilePath)
@@ -118,6 +121,7 @@ class App {
         PixelCalibration cal = new PixelCalibration.Builder()
             .pixelSizeMicrons(pixelSizeMicrons, pixelSizeMicrons)
             .build()
+        println "Set pixel calibration: " + cal
 
         // Add cell measurements
         ObjectMeasurements.addShapeMeasurements(
@@ -131,6 +135,37 @@ class App {
             ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
             ObjectMeasurements.ShapeFeatures.SOLIDITY
         )
+
+        // Build a server for intensity measuruements
+        def server = QP.buildServer(tiffFilePath)
+
+        // Define measurements
+        def measurements = [
+            ObjectMeasurements.Measurements.MEAN,
+            ObjectMeasurements.Measurements.MEDIAN,
+            ObjectMeasurements.Measurements.MIN,
+            ObjectMeasurements.Measurements.MAX,
+            ObjectMeasurements.Measurements.STD_DEV
+        ]
+
+        // Define compartments
+        def compartments = [
+            ObjectMeasurements.Compartments.CELL,
+            ObjectMeasurements.Compartments.CYTOPLASM,
+            ObjectMeasurements.Compartments.MEMBRANE,
+            ObjectMeasurements.Compartments.NUCLEUS
+        ]
+
+        // Add intensity measurements
+         pathObjects.each { pathObject ->
+            ObjectMeasurements.addIntensityMeasurements(
+                server,
+                pathObject,
+                downsampleFactor,
+                measurements,
+                compartments
+            )
+        }
 
         // Export the objects to GeoJSON
         QP.exportObjectsToGeoJson(
