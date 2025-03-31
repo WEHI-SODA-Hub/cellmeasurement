@@ -3,6 +3,7 @@ package wehisodahub.cellmeasurement
 import ij.IJ
 import ij.process.ColorProcessor
 import qupath.lib.roi.interfaces.ROI
+import qupath.lib.roi.ROIs
 import qupath.lib.scripting.QP
 import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
@@ -136,7 +137,7 @@ class App {
             ObjectMeasurements.ShapeFeatures.SOLIDITY
         )
 
-        // Build a server for intensity measuruements
+        // Build a server with supplied TIFF file
         def uri = new File(tiffFilePath).toURI()
         def builder = new BioFormatsServerBuilder()
         def server = builder.buildServer(uri)
@@ -169,6 +170,15 @@ class App {
                 compartments
             )
         }
+
+        // Create a top-level annotation object for the whole image
+        def width = server.getWidth()
+        def height = server.getHeight()
+        def roi = ROIs.createRectangleROI(0, 0, width, height, null)
+        def annotation = PathObjects.createAnnotationObject(roi)
+
+        // Add the annotation object to the start of the pathObjects list
+        pathObjects.add(0, annotation)
 
         // Export the objects to GeoJSON
         QP.exportObjectsToGeoJson(
