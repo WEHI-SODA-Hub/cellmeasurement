@@ -5,6 +5,7 @@ import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 
 import java.awt.geom.Point2D
+import java.nio.file.Paths
 
 import ij.IJ
 import ij.process.ColorProcessor
@@ -18,13 +19,18 @@ import qupath.lib.roi.GeometryTools
 import qupath.lib.scripting.QP
 import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
-import qupath.lib.objects.CellTools;
+import qupath.lib.objects.CellTools
 import qupath.lib.regions.ImagePlane
 import qupath.lib.io.PathIO.GeoJsonExportOptions
 import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.images.servers.PixelCalibration
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 
+/**
+* Entry point for the cell measurement application.
+* This application takes nuclear and whole-cell segmentation masks, matches the nuclei
+* to cells and uses the QuPath API to add cell shape and intensity measurements.
+*/
 @Command(name = 'cellmeasurement',
          mixinStandardHelpOptions = true,
          version = '0.1',
@@ -54,12 +60,12 @@ class App implements Runnable {
     @Option(names = ['-d', '--downsample-factor'],
             description = 'Downsample factor',
             required = false)
-    double downsampleFactor = 1.0
+    BigDecimal downsampleFactor = 1.0
 
     @Option(names = ['-p', '--pixel-size-microns'],
             description = 'Pixel size in microns (default: 0.5)',
             required = false)
-    double pixelSizeMicrons = 0.5
+    BigDecimal pixelSizeMicrons = 0.5
 
     @Option(names = ['--skip-measurements'],
             description = 'Skip adding measurements',
@@ -69,17 +75,17 @@ class App implements Runnable {
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
             required = false)
-    double distThreshold = 10.0
+    BigDecimal distThreshold = 10.0
 
     @Option(names = ['-e', '--cell-expansion'],
             description = 'Expansion factor for cell boundary estimation in pixels (default = 3.0)',
             required = false)
-    double cellExpansion = 3.0
+    BigDecimal cellExpansion = 3.0
 
     // Extract ROIs from a given image
     static List<ROI> extractROIs(image, downsampleFactor) {
         def ip = image.getProcessor()
-        if (ip instanceof ColorProcessor) {
+        if (ColorProcessor.class.isAssignableFrom(ip.getClass())) {
             throw new IllegalArgumentException('RGB images are not supported!')
         }
 
@@ -94,13 +100,13 @@ class App implements Runnable {
         println 'Number of ROIs found: ' + roisIJ.size()
 
         return roisIJ.collect {
-            if (it == null) return
+            if (it == null) { return }
             return IJTools.convertToROI(it, 0, 0, downsampleFactor, ImagePlane.getDefaultPlane())
         }.findAll { it != null }
     }
 
-    static List<PathObject> createCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
-                                              double distThreshold, double cellExpansion) {
+    static List<PathObject> makeCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
+                                              BigDecimal distThreshold, BigDecimal cellExpansion) {
         def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, cellExpansion)
         def pathObjects = matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
@@ -111,7 +117,7 @@ class App implements Runnable {
     }
 
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
-                                     double distThreshold, double cellExpansion) {
+                                     BigDecimal distThreshold, BigDecimal cellExpansion) {
         def matchedPairs = []
 
         nuclearROIs.each { nuclearROI ->
@@ -127,13 +133,13 @@ class App implements Runnable {
         return matchedPairs
     }
 
-    static ROI findNearestROI(Point2D centroid, List<ROI> rois, double distThreshold) {
+    static ROI findNearestROI(Point2D centroid, List<ROI> rois, BigDecimal distThreshold) {
         ROI nearestROI = null
-        double minDistance = Double.MAX_VALUE
+        BigDecimal minDistance = Double.MAX_VALUE
 
         rois.each { roi ->
             def roiCentroid = new Point2D.Double(roi.getCentroidX(), roi.getCentroidY())
-            double distance = centroid.distance(roiCentroid)
+            BigDecimal distance = centroid.distance(roiCentroid)
             if (distance < minDistance && distance < distThreshold) {
                 minDistance = distance
                 nearestROI = roi
@@ -154,7 +160,7 @@ class App implements Runnable {
         println 'Loaded nuclear mask width: ' + nuclearImp.getWidth()
 
         // Build a server with supplied TIFF file
-        def uri = new File(tiffFilePath).toURI()
+        def uri = Paths.get(tiffFilePath).toUri()
         def builder = new BioFormatsServerBuilder()
         def server = builder.buildServer(uri)
 
@@ -167,7 +173,7 @@ class App implements Runnable {
         println 'Total nuclear ROIs: ' + nuclearROIs.size()
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
-        def pathObjects = createCellObjects(wholeCellROIs, nuclearROIs, distThreshold, cellExpansion)
+        def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, cellExpansion)
         println 'Total path objects: ' + pathObjects.size()
 
         if (!skipMeasurements) {
@@ -240,7 +246,9 @@ class App implements Runnable {
 
     static void main(String[] args) {
         int exitCode = new CommandLine(new App()).execute(args)
-        System.exit(exitCode)
+        if (exitCode != 0) {
+            println "Application exited with code: $exitCode"
+        }
     }
 
 }
