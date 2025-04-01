@@ -14,9 +14,11 @@ import qupath.imagej.tools.IJTools
 
 import qupath.lib.roi.interfaces.ROI
 import qupath.lib.roi.ROIs
+import qupath.lib.roi.GeometryTools
 import qupath.lib.scripting.QP
 import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
+import qupath.lib.objects.CellTools;
 import qupath.lib.regions.ImagePlane
 import qupath.lib.io.PathIO.GeoJsonExportOptions
 import qupath.lib.analysis.features.ObjectMeasurements
@@ -64,11 +66,15 @@ class App implements Runnable {
             required = false)
     boolean skipMeasurements = false
 
-
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
             required = false)
     double distThreshold = 10.0
+
+    @Option(names = ['-e', '--cell-expansion'],
+            description = 'Expansion factor for cell boundary estimation in pixels (default = 3.0)',
+            required = false)
+    double cellExpansion = 3.0
 
     // Extract ROIs from a given image
     static List<ROI> extractROIs(image, downsampleFactor) {
@@ -93,8 +99,9 @@ class App implements Runnable {
         }.findAll { it != null }
     }
 
-    static List<PathObject> createCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs, double distThreshold) {
-        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold)
+    static List<PathObject> createCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
+                                              double distThreshold, double cellExpansion) {
+        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, cellExpansion)
         return matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
@@ -102,12 +109,17 @@ class App implements Runnable {
         }.findAll { it != null }
     }
 
-    static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs, double distThreshold) {
+    static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
+                                     double distThreshold, double cellExpansion) {
         def matchedPairs = []
 
         nuclearROIs.each { nuclearROI ->
             def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
             def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
+            if (nearestCell == null) {
+                def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), cellExpansion, 1.0)
+                nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
+            }
             matchedPairs << [nuclearROI, nearestCell]
         }
 
@@ -154,7 +166,7 @@ class App implements Runnable {
         println 'Total nuclear ROIs: ' + nuclearROIs.size()
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
-        def pathObjects = createCellObjects(wholeCellROIs, nuclearROIs, distThreshold)
+        def pathObjects = createCellObjects(wholeCellROIs, nuclearROIs, distThreshold, cellExpansion)
         println 'Total path objects: ' + pathObjects.size()
 
         if (!skipMeasurements) {
