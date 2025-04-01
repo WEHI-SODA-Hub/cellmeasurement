@@ -102,11 +102,12 @@ class App implements Runnable {
     static List<PathObject> createCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
                                               double distThreshold, double cellExpansion) {
         def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, cellExpansion)
-        return matchedPairs.collect { nucleus, cell ->
+        def pathObjects = matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
             }
         }.findAll { it != null }
+        return CellTools.constrainCellOverlaps(pathObjects)
     }
 
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
