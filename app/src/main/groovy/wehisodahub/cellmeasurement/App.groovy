@@ -82,7 +82,9 @@ class App implements Runnable {
             required = false)
     BigDecimal cellExpansion = 3.0
 
-    // Extract ROIs from a given image
+    /**
+    * Extract ROIs from a binary mask image.
+    */
     static List<ROI> extractROIs(image, downsampleFactor) {
         def ip = image.getProcessor()
         if (ColorProcessor.class.isAssignableFrom(ip.getClass())) {
@@ -105,6 +107,9 @@ class App implements Runnable {
         }.findAll { it != null }
     }
 
+    /**
+    * Create cell objects from matched nuclear and whole cell ROIs.
+    */
     static List<PathObject> makeCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
                                               BigDecimal distThreshold, BigDecimal cellExpansion) {
         def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, cellExpansion)
@@ -116,6 +121,10 @@ class App implements Runnable {
         return CellTools.constrainCellOverlaps(pathObjects)
     }
 
+    /**
+    * Match nuclear ROIs to whole cell ROIs based on distance between centroids.
+    * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion
+    */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
                                      BigDecimal distThreshold, BigDecimal cellExpansion) {
         def matchedPairs = []
@@ -133,6 +142,9 @@ class App implements Runnable {
         return matchedPairs
     }
 
+    /**
+    * Find the nearest ROI to a given centroid within a list of ROIs.
+    */
     static ROI findNearestROI(Point2D centroid, List<ROI> rois, BigDecimal distThreshold) {
         ROI nearestROI = null
         BigDecimal minDistance = Double.MAX_VALUE
@@ -147,6 +159,23 @@ class App implements Runnable {
         }
 
         return nearestROI
+    }
+
+    /**
+    * Filter out cells that have a membrane outside of the image bounds.
+    */
+    static List<PathObject> removeOutOfBoundsCells(List<PathObject> pathObjects, int imageWidth, int imageHeight) {
+        return pathObjects.findAll { cell ->
+            def roi = cell.getROI()
+            def boundsX = roi.getBoundsX()
+            def boundsY = roi.getBoundsY()
+            def boundsWidth = roi.getBoundsWidth()
+            def boundsHeight = roi.getBoundsHeight()
+            return boundsX >= 0 &&
+                   boundsY >= 0 &&
+                   boundsX + boundsWidth <= imageWidth &&
+                   boundsY + boundsHeight <= imageHeight
+        }
     }
 
     @Override
@@ -175,6 +204,11 @@ class App implements Runnable {
         // Convert QuPath ROIs to objects and add them to the hierarchy
         def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, cellExpansion)
         println 'Total path objects: ' + pathObjects.size()
+
+        // Filter out any cells that have a membrane outside of the image bounds
+        def imageWidth = server.getWidth()
+        def imageHeight = server.getHeight()
+        pathObjects = removeOutOfBoundsCells(pathObjects, imageWidth, imageHeight)
 
         if (!skipMeasurements) {
             // Set the pixel calibration
@@ -227,9 +261,7 @@ class App implements Runnable {
         }
 
         // Create a top-level annotation object for the whole image
-        def width = server.getWidth()
-        def height = server.getHeight()
-        def roi = ROIs.createRectangleROI(0, 0, width, height, null)
+        def roi = ROIs.createRectangleROI(0, 0, imageWidth, imageHeight, null)
         def annotation = PathObjects.createAnnotationObject(roi)
 
         // Add the annotation object to the start of the pathObjects list
