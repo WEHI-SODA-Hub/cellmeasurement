@@ -119,6 +119,7 @@ class App implements Runnable {
             }
         }.findAll { it != null }
         return CellTools.constrainCellOverlaps(pathObjects)
+        //return pathObjects
     }
 
     /**
