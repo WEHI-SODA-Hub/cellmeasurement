@@ -1,0 +1,25 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    name: Build and deploy container
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build the image
+      run: docker build . --file Dockerfile --tag ghcr.io/${GITHUB_REPOSITORY,,}:latest
+
+    - name: Deploy the image
+      run: |
+        echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        docker push ghcr.io/${GITHUB_REPOSITORY,,}:latest
