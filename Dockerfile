@@ -11,4 +11,9 @@ COPY --chown=gradle:gradle app $APP_HOME/app
 
 RUN gradle build --no-daemon
 
-ENTRYPOINT ["gradle", "run"]
+RUN echo '#!/bin/sh' > /entrypoint.sh && \
+    echo 'cd /cellmeasurement' >> /entrypoint.sh && \
+    echo 'exec gradle run --no-daemon -Dorg.gradle.native=false -Dorg.gradle.configuration-cache=false --no-build-cache --no-problems-report -x compileGroovy -x classes -x processResources "$@"' >> /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
