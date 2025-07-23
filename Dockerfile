@@ -1,4 +1,4 @@
-FROM gradle:8.14.3-jdk17
+FROM gradle:8.14.3-jdk21
 
 ARG BUILD_HOME=/cellmeasurement
 
