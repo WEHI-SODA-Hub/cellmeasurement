@@ -4,6 +4,8 @@ import picocli.CommandLine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 
+import groovyx.gpars.GParsPool
+
 import java.awt.geom.Point2D
 import java.nio.file.Paths
 
@@ -82,10 +84,15 @@ class App implements Runnable {
             required = false)
     BigDecimal cellExpansion = 3.0
 
+    @Option(names = ['-c', '--concurrency'],
+            description = 'Number of threads to use for parallel processing (default: 1)',
+            required = false)
+    int concurrency = 1
+
     /**
     * Extract ROIs from a binary mask image.
     */
-    static List<ROI> extractROIs(image, downsampleFactor) {
+    static List<ROI> extractROIs(image, downsampleFactor, concurrency = 1) {
         def ip = image.getProcessor()
         if (ColorProcessor.class.isAssignableFrom(ip.getClass())) {
             throw new IllegalArgumentException('RGB images are not supported!')
@@ -101,10 +108,12 @@ class App implements Runnable {
         def roisIJ = RoiLabeling.labelsToConnectedROIs(ip, n)
         println 'Number of ROIs found: ' + roisIJ.size()
 
-        return roisIJ.collect {
-            if (it == null) { return }
-            return IJTools.convertToROI(it, 0, 0, downsampleFactor, ImagePlane.getDefaultPlane())
-        }.findAll { it != null }
+        GParsPool.withPool(concurrency) {
+            return roisIJ.collectParallel {
+                if (it == null) { return }
+                return IJTools.convertToROI(it, 0, 0, downsampleFactor, ImagePlane.getDefaultPlane())
+            }.findAll { it != null }
+        }
     }
 
     /**
@@ -119,7 +128,6 @@ class App implements Runnable {
             }
         }.findAll { it != null }
         return CellTools.constrainCellOverlaps(pathObjects)
-        //return pathObjects
     }
 
     /**
@@ -127,20 +135,19 @@ class App implements Runnable {
     * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion
     */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
-                                     BigDecimal distThreshold, BigDecimal cellExpansion) {
-        def matchedPairs = []
-
-        nuclearROIs.each { nuclearROI ->
-            def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
-            def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
-            if (nearestCell == null) {
-                def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), cellExpansion, 1.0)
-                nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
+                                     BigDecimal distThreshold, BigDecimal cellExpansion,
+                                     concurrency = 1) {
+        GParsPool.withPool(concurrency) {
+            nuclearROIs.collectParallel { nuclearROI ->
+                def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
+                def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
+                if (nearestCell == null) {
+                    def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), cellExpansion, 1.0)
+                    nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
+                }
+                return [nuclearROI, nearestCell]
             }
-            matchedPairs << [nuclearROI, nearestCell]
         }
-
-        return matchedPairs
     }
 
     /**
@@ -195,8 +202,9 @@ class App implements Runnable {
         def server = builder.buildServer(uri)
 
         // Extract ROIs from whole cell and nuclear masks
-        def wholeCellROIs = extractROIs(wholeCellImp, downsampleFactor)
-        def nuclearROIs = extractROIs(nuclearImp, downsampleFactor)
+        println 'Extracting ROIs...'
+        def wholeCellROIs = extractROIs(wholeCellImp, downsampleFactor, concurrency)
+        def nuclearROIs = extractROIs(nuclearImp, downsampleFactor, concurrency)
 
         //[wholeCellROIs,nuclearROIs].transpose().collect { a, b -> println a ; println b }
         println 'Total whole cell ROIs: ' + wholeCellROIs.size()
@@ -219,17 +227,22 @@ class App implements Runnable {
             println 'Set pixel calibration: ' + cal
 
             println 'Adding cell measurements...'
-            ObjectMeasurements.addShapeMeasurements(
-                pathObjects,
-                cal,
-                ObjectMeasurements.ShapeFeatures.AREA,
-                ObjectMeasurements.ShapeFeatures.CIRCULARITY,
-                ObjectMeasurements.ShapeFeatures.LENGTH,
-                ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
-                ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
-                ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
-                ObjectMeasurements.ShapeFeatures.SOLIDITY
-            )
+            GParsPool.withPool(concurrency) {
+                // Add cell shape measurements
+                pathObjects.eachParallel { pathObject ->
+                    ObjectMeasurements.addShapeMeasurements(
+                        pathObject,
+                        cal,
+                        ObjectMeasurements.ShapeFeatures.AREA,
+                        ObjectMeasurements.ShapeFeatures.CIRCULARITY,
+                        ObjectMeasurements.ShapeFeatures.LENGTH,
+                        ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
+                        ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
+                        ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
+                        ObjectMeasurements.ShapeFeatures.SOLIDITY
+                    )
+                }
+            }
 
             // Define measurements
             def measurements = [
@@ -249,15 +262,17 @@ class App implements Runnable {
             ]
 
             println 'Adding intensity measurements...'
-            // Add intensity measurements
-            pathObjects.each { pathObject ->
-                ObjectMeasurements.addIntensityMeasurements(
-                    server,
-                    pathObject,
-                    downsampleFactor,
-                    measurements,
-                    compartments
-                )
+            GParsPool.withPool(concurrency) {
+                // Add intensity measurements
+                pathObjects.eachParallel { pathObject ->
+                    ObjectMeasurements.addIntensityMeasurements(
+                        server,
+                        pathObject,
+                        downsampleFactor,
+                        measurements,
+                        compartments
+                    )
+                }
             }
         }
 
@@ -268,7 +283,7 @@ class App implements Runnable {
         // Add the annotation object to the start of the pathObjects list
         pathObjects.add(0, annotation)
 
-        // Export the objects to GeoJSON
+        println 'Exporting to GeoJSON...'
         QP.exportObjectsToGeoJson(
             pathObjects,
             outputFilePath,

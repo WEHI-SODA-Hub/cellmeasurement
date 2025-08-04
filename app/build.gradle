@@ -34,6 +34,9 @@ dependencies {
     // Picocli dependency for command line interface
     implementation libs.picocli
 
+    // Gpars dependency for parallel processing
+    implementation libs.gpars
+
     // ImageJ dependency
     implementation libs.imagej
 
