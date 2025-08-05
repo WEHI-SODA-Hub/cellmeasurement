@@ -49,7 +49,7 @@ class App implements Runnable {
             required = true)
     String wholeCellMaskFilePath
 
-    @Option(names = ['-t', '--tiff-file'],
+    @Option(names = ['-f', '--tiff-file'],
             description = 'TIFF file containing multi-channel image data',
             required = true)
     String tiffFilePath
@@ -84,15 +84,15 @@ class App implements Runnable {
             required = false)
     BigDecimal cellExpansion = 3.0
 
-    @Option(names = ['-c', '--concurrency'],
+    @Option(names = ['-t', '--threads'],
             description = 'Number of threads to use for parallel processing (default: 1)',
             required = false)
-    int concurrency = 1
+    int threads = 1
 
     /**
     * Extract ROIs from a binary mask image.
     */
-    static List<ROI> extractROIs(image, downsampleFactor, concurrency = 1) {
+    static List<ROI> extractROIs(image, downsampleFactor, threads = 1) {
         def ip = image.getProcessor()
         if (ColorProcessor.class.isAssignableFrom(ip.getClass())) {
             throw new IllegalArgumentException('RGB images are not supported!')
@@ -108,7 +108,7 @@ class App implements Runnable {
         def roisIJ = RoiLabeling.labelsToConnectedROIs(ip, n)
         println 'Number of ROIs found: ' + roisIJ.size()
 
-        GParsPool.withPool(concurrency) {
+        GParsPool.withPool(threads) {
             return roisIJ.collectParallel {
                 if (it == null) { return }
                 return IJTools.convertToROI(it, 0, 0, downsampleFactor, ImagePlane.getDefaultPlane())
@@ -136,8 +136,8 @@ class App implements Runnable {
     */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
                                      BigDecimal distThreshold, BigDecimal cellExpansion,
-                                     concurrency = 1) {
-        GParsPool.withPool(concurrency) {
+                                     threads = 1) {
+        GParsPool.withPool(threads) {
             nuclearROIs.collectParallel { nuclearROI ->
                 def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
                 def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
@@ -203,8 +203,8 @@ class App implements Runnable {
 
         // Extract ROIs from whole cell and nuclear masks
         println 'Extracting ROIs...'
-        def wholeCellROIs = extractROIs(wholeCellImp, downsampleFactor, concurrency)
-        def nuclearROIs = extractROIs(nuclearImp, downsampleFactor, concurrency)
+        def wholeCellROIs = extractROIs(wholeCellImp, downsampleFactor, threads)
+        def nuclearROIs = extractROIs(nuclearImp, downsampleFactor, threads)
 
         //[wholeCellROIs,nuclearROIs].transpose().collect { a, b -> println a ; println b }
         println 'Total whole cell ROIs: ' + wholeCellROIs.size()
@@ -227,7 +227,7 @@ class App implements Runnable {
             println 'Set pixel calibration: ' + cal
 
             println 'Adding cell measurements...'
-            GParsPool.withPool(concurrency) {
+            GParsPool.withPool(threads) {
                 // Add cell shape measurements
                 pathObjects.eachParallel { pathObject ->
                     ObjectMeasurements.addShapeMeasurements(
@@ -262,7 +262,7 @@ class App implements Runnable {
             ]
 
             println 'Adding intensity measurements...'
-            GParsPool.withPool(concurrency) {
+            GParsPool.withPool(threads) {
                 // Add intensity measurements
                 pathObjects.eachParallel { pathObject ->
                     ObjectMeasurements.addIntensityMeasurements(
