@@ -79,10 +79,10 @@ class App implements Runnable {
             required = false)
     BigDecimal distThreshold = 10.0
 
-    @Option(names = ['-e', '--cell-expansion'],
-            description = 'Expansion factor for cell boundary estimation in pixels (default = 3.0)',
+    @Option(names = ['-e', '--estimate-cell-boundary-dist'],
+            description = 'Where no matching membrane ROI exists, expand the nucleus by this many pixels (default = 3.0)',
             required = false)
-    BigDecimal cellExpansion = 3.0
+    BigDecimal estimateCellBoundaryDist = 3.0
 
     @Option(names = ['-t', '--threads'],
             description = 'Number of threads to use for parallel processing (default: 1)',
@@ -120,8 +120,8 @@ class App implements Runnable {
     * Create cell objects from matched nuclear and whole cell ROIs.
     */
     static List<PathObject> makeCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
-                                              BigDecimal distThreshold, BigDecimal cellExpansion) {
-        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, cellExpansion)
+                                              BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist) {
+        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, estimateCellBoundaryDist)
         def pathObjects = matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
@@ -135,14 +135,14 @@ class App implements Runnable {
     * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion
     */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
-                                     BigDecimal distThreshold, BigDecimal cellExpansion,
+                                     BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist,
                                      threads = 1) {
         GParsPool.withPool(threads) {
             nuclearROIs.collectParallel { nuclearROI ->
                 def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
                 def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
                 if (nearestCell == null) {
-                    def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), cellExpansion, 1.0)
+                    def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), estimateCellBoundaryDist, 1.0)
                     nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
                 }
                 return [nuclearROI, nearestCell]
@@ -211,7 +211,7 @@ class App implements Runnable {
         println 'Total nuclear ROIs: ' + nuclearROIs.size()
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
-        def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, cellExpansion)
+        def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist)
         println 'Total path objects: ' + pathObjects.size()
 
         // Filter out any cells that have a membrane outside of the image bounds
