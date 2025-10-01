@@ -31,17 +31,24 @@ As long as you have Java installed, gradle should be able to handle the rest.
    ./gradlew build
    ```
 
+3. Test the project
+   ```sh
+   ./gradlew test
+   ```
+
 ## Usage
 
 Here is an example of running the app:
 
 ```sh
 ./gradlew run \
-    --args="--nuclear-mask=nuclear_mask.tiff \
-            --whole-cell-mask=whole_cell_mask.tiff \
-            --tiff-file=image.tiff \
-            --output-file=annotations.geojson"
+    --args="--nuclear-mask=$PWD/app/src/test/resources/synthetic_test_nuclear.tiff \
+            --whole-cell-mask=$PWD/app/src/test/resources/synthetic_test_whole-cell.tiff \
+            --tiff-file=$PWD/app/src/test/resources/synthetic_test.ome.tif \
+            --output-file=$PWD/segmentation.geojson"
 ```
+
+Make sure to use absolute paths.
 
 Full arguments:
 
@@ -80,6 +87,19 @@ segmentations first, it is recommended to run with `--skip-measurements=true`.
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request for any changes.
+
+## Test Data
+
+Test data was derived from [nf-core/test-datasets](https://github.com/nf-core/test-datasets)
+under the MIT License.
+
+### Source Files
+All source files were derived from [nuclear_image.tif](https://github.com/nf-core/test-datasets/blob/modules/data/imaging/segmentation/nuclear_image.tif):
+
+- `app/src/test/resources/synthetic_test.ome.tif` -- derived from [script in spatialproteomics pipeline](https://github.com/WEHI-SODA-Hub/spatialproteomics/blob/main/tests/data/comet/make_comet_test_data.py)
+  and run through background subtraction step.
+- `app/src/test/resources/synthetic_test_nuclear.tiff` -- `parquettotiff` output from [spatialproteomics pipeline](https://github.com/WEHI-SODA-Hub/spatialproteomics).
+- `app/src/test/resources/test_data_whole-cell.tiff` -- as above.
 
 ## License
 
