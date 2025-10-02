@@ -1,0 +1,36 @@
+name: CI - Docker Build and Test
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: cellmeasurement-test:latest
+        load: true
+
+    - name: Run Groovy tests 
+      run: |
+        mkdir -p /tmp/.gradle
+        docker run --rm -v ${{ github.workspace }}:/cellmeasurement \
+          -v /tmp/.gradle:/cellmeasurement/.gradle \
+          -w /cellmeasurement cellmeasurement-test:latest \
+            exec gradle test --no-daemon -Dorg.gradle.native=false \
+            -Dorg.gradle.configuration-cache=false --no-build-cache \
+            --no-problems-report -x compileGroovy -x classes -x processResources
