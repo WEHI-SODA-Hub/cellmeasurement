@@ -2,4 +2,7 @@
 .gradle
 build
 !gradle/wrapper/gradle-wrapper.jar
+.javacpp
 
+# Mac OS specific files
+.DS_Store
