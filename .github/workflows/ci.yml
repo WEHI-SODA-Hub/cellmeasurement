@@ -28,9 +28,6 @@ jobs:
     - name: Run Groovy tests 
       run: |
         mkdir -p /tmp/.gradle
-        docker run --rm -w /cellmeasurement \
-          -v /tmp/.gradle:/cellmeasurement/.gradle \
+        docker run --rm -v /tmp/.gradle:/cellmeasurement/.gradle \
             cellmeasurement-test:latest \
-            gradle test --no-daemon -Dorg.gradle.native=false \
-            -Dorg.gradle.configuration-cache=false --no-build-cache \
-            --no-problems-report -x compileGroovy -x classes -x processResources
+            /cellmeasurement.sh
