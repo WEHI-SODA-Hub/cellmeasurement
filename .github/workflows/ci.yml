@@ -29,5 +29,4 @@ jobs:
       run: |
         mkdir -p /tmp/.gradle
         docker run --rm -v /tmp/.gradle:/cellmeasurement/.gradle \
-            cellmeasurement-test:latest \
-            /cellmeasurement.sh
+            cellmeasurement-test:latest
