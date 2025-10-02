@@ -28,9 +28,9 @@ jobs:
     - name: Run Groovy tests 
       run: |
         mkdir -p /tmp/.gradle
-        docker run --rm -v ${{ github.workspace }}:/cellmeasurement \
+        docker run --rm -w /cellmeasurement \
           -v /tmp/.gradle:/cellmeasurement/.gradle \
-          -w /cellmeasurement cellmeasurement-test:latest \
+            cellmeasurement-test:latest \
             gradle test --no-daemon -Dorg.gradle.native=false \
             -Dorg.gradle.configuration-cache=false --no-build-cache \
             --no-problems-report -x compileGroovy -x classes -x processResources
