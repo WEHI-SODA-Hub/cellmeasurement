@@ -31,6 +31,6 @@ jobs:
         docker run --rm -v ${{ github.workspace }}:/cellmeasurement \
           -v /tmp/.gradle:/cellmeasurement/.gradle \
           -w /cellmeasurement cellmeasurement-test:latest \
-            exec gradle test --no-daemon -Dorg.gradle.native=false \
+            gradle test --no-daemon -Dorg.gradle.native=false \
             -Dorg.gradle.configuration-cache=false --no-build-cache \
             --no-problems-report -x compileGroovy -x classes -x processResources
