@@ -29,4 +29,7 @@ jobs:
       run: |
         mkdir -p /tmp/.gradle
         docker run --rm -v /tmp/.gradle:/cellmeasurement/.gradle \
-            cellmeasurement-test:latest
+            -w /cellmeasurement \
+            --entrypoint /bin/sh \
+            cellmeasurement-test:latest \
+            -c "gradle test --no-daemon -Dorg.gradle.native=false -Dorg.gradle.configuration-cache=false --no-build-cache --no-problems-report -x compileGroovy -x classes -x processResources"
