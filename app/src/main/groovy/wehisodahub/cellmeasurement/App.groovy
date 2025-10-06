@@ -8,13 +8,20 @@ import groovyx.gpars.GParsPool
 
 import java.awt.geom.Point2D
 import java.nio.file.Paths
+import java.awt.Rectangle
+import java.awt.image.BufferedImage
+
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 
 import ij.IJ
 import ij.process.ColorProcessor
+import ij.process.ByteProcessor
+import ij.process.ImageProcessor
 
 import qupath.imagej.processing.RoiLabeling
 import qupath.imagej.tools.IJTools
 
+import qupath.lib.roi.RectangleROI
 import qupath.lib.roi.interfaces.ROI
 import qupath.lib.roi.ROIs
 import qupath.lib.roi.GeometryTools
@@ -23,8 +30,10 @@ import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
 import qupath.lib.objects.CellTools
 import qupath.lib.regions.ImagePlane
+import qupath.lib.regions.RegionRequest
 import qupath.lib.io.PathIO.GeoJsonExportOptions
 import qupath.lib.analysis.features.ObjectMeasurements
+import qupath.lib.measurements.MeasurementList
 import qupath.lib.images.servers.PixelCalibration
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 
@@ -73,6 +82,11 @@ class App implements Runnable {
             description = 'Skip adding measurements',
             required = false)
     boolean skipMeasurements = false
+
+    @Option(names = ['--percentiles'],
+            description = 'Calculate specified comma-separated intensity percentiles. Only works if not skipping measurements. E.g. "70,80,90,95,96,97,98,99"',
+            required = false)
+    String percentiles = ''
 
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
@@ -186,6 +200,199 @@ class App implements Runnable {
         }
     }
 
+    /**
+     * Add percentile measurements for cell objects by compartment
+     * @param server ImageServer containing the pixel data
+     * @param pathObject PathObject to measure (MeasurementList will be updated)
+     * @param downsampleFactor Resolution at which to request pixels
+     * @param percentiles List of percentiles to calculate (default: [70, 80, 90, 95, 96, 97, 98, 99])
+     * @param compartments Set of compartments to measure ('NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL')
+     */
+    def addPercentileMeasurements(server, PathObject pathObject, double downsampleFactor = 1.0,
+                                  List<Double> percentiles = [70, 80, 90, 95, 96, 97, 98, 99],
+                                  Set<String> compartments = ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL']) {
+
+        // Only process cells
+        if (!pathObject.isCell()) {
+            return
+        }
+
+        def cell = pathObject
+        def cellROI = cell.getROI()
+        def nucleusROI = cell.getNucleusROI()
+
+        if (cellROI == null) {
+            return
+        }
+
+        // Get bounding box for the cell
+        def bounds = cellROI.getBoundsX() != Double.POSITIVE_INFINITY ?
+                     new RectangleROI((cellROI.getBoundsX() / downsampleFactor),
+                                      (cellROI.getBoundsY() / downsampleFactor),
+                                      (cellROI.getBoundsWidth() / downsampleFactor + 1),
+                                      (cellROI.getBoundsHeight() / downsampleFactor + 1)) :
+                     new RectangleROI(0, 0, server.getWidth(), server.getHeight())
+
+        // Create region request
+        def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
+
+        try {
+            // Get the image data
+            def img = server.readRegion(request)
+            if (img == null) return
+
+            int width = img.getWidth()
+            int height = img.getHeight()
+            int nChannels = server.nChannels()
+
+            // Create compartment masks
+            def pathImage = IJTools.convertToImagePlus(server, request);
+            def masks = createCompartmentMasks(cellROI, nucleusROI, width, height, pathImage, compartments)
+
+            // Extract pixel values for each channel and compartment
+            def measurements = cell.getMeasurementList()
+
+            for (int c = 0; c < nChannels; c++) {
+                def channelName = server.getChannel(c).getName()
+                def pixelValues = extractChannelPixels(img, c, width, height)
+
+                masks.each { compartment, mask ->
+                    if (compartments.contains(compartment)) {
+                        def compartmentPixels = getCompartmentPixels(pixelValues, mask)
+                        if (compartmentPixels.size() > 0) {
+                            addPercentileMeasurementsForCompartment(measurements, compartmentPixels,
+                                                                    channelName, compartment, percentiles)
+                        }
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            println("Error processing ${pathObject}: ${e.getMessage()}")
+        }
+    }
+
+    /**
+     * Create binary masks for different cell compartments
+     */
+    def createCompartmentMasks(cellROI, nucleusROI, int width, int height, pathImage, compartments) {
+        def masks = [:]
+
+        // Create cell mask
+        if (compartments.contains('CELL')) {
+            masks['CELL'] = createROIMask(cellROI, width, height, pathImage)
+        }
+
+        // Create nucleus mask
+        def nucleusMask = null
+        if (nucleusROI != null && (compartments.contains('NUCLEUS') || compartments.contains('CYTOPLASM'))) {
+            nucleusMask = createROIMask(nucleusROI, width, height, pathImage)
+            if (compartments.contains('NUCLEUS')) {
+                masks['NUCLEUS'] = nucleusMask
+            }
+        }
+
+        // Create cytoplasm mask (cell - nucleus)
+        if (compartments.contains('CYTOPLASM') && masks.containsKey('CELL') && nucleusMask != null) {
+            masks['CYTOPLASM'] = subtractMasks(masks['CELL'], nucleusMask)
+        }
+
+        // Create membrane mask (cell boundary)
+        if (compartments.contains('MEMBRANE') && masks.containsKey('CELL')) {
+            masks['MEMBRANE'] = createMembraneMask(masks['CELL'])
+        }
+
+        return masks
+    }
+
+    /**
+     * Create binary mask from ROI
+     */
+    def createROIMask(roi, int width, int height, pathImage) {
+        def mask = new ByteProcessor(width, height)
+
+        def roiIJ = IJTools.convertToIJRoi(roi, pathImage)
+
+        mask.setColor(255)
+        mask.fill(roiIJ)
+
+        return mask
+    }
+
+    /**
+     * Subtract one mask from another
+     */
+    def subtractMasks(mask1, mask2) {
+        def result = mask1.duplicate()
+        def pixels1 = result.getPixels() as byte[]
+        def pixels2 = mask2.getPixels() as byte[]
+
+        for (int i = 0; i < pixels1.length; i++) {
+            if (pixels2[i] != 0) {
+                pixels1[i] = 0
+            }
+        }
+
+        return result
+    }
+
+    /**
+     * Create membrane mask by finding boundary pixels
+     */
+    def createMembraneMask(cellMask) {
+        def membrane = cellMask.duplicate()
+        membrane.findEdges()
+        return membrane
+    }
+
+    /**
+     * Extract pixel values for a specific channel
+     */
+    def extractChannelPixels(BufferedImage img, int channel, int width, int height) {
+        def pixels = new float[width * height]
+        def raster = img.getRaster()
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                pixels[y * width + x] = raster.getSampleFloat(x, y, channel)
+            }
+        }
+
+        return pixels
+    }
+
+    /**
+     * Get pixel values within a compartment mask
+     */
+    def getCompartmentPixels(float[] allPixels, ByteProcessor mask) {
+        def maskPixels = mask.getPixels() as byte[]
+        def compartmentPixels = []
+
+        for (int i = 0; i < maskPixels.length; i++) {
+            if (maskPixels[i] != 0) {
+                compartmentPixels.add(allPixels[i] as double)
+            }
+        }
+
+        return compartmentPixels
+    }
+
+    /**
+     * Calculate and add percentile measurements for a compartment
+     */
+    def addPercentileMeasurementsForCompartment(MeasurementList measurements, List<Double> pixels,
+                                               String channelName, String compartment, List<Double> percentiles) {
+        def stats = new DescriptiveStatistics()
+        pixels.each { stats.addValue(it) }
+
+        percentiles.each { percentile ->
+            def value = stats.getPercentile(percentile)
+            def compartmentName = compartment.toLowerCase().capitalize()
+            def measurementName = "${channelName}: ${compartmentName}: Percentile: ${percentile}"
+            measurements.putMeasurement(measurementName, value)
+        }
+    }
+
     @Override
     void run() {
         // Load whole cell mask image
@@ -272,6 +479,21 @@ class App implements Runnable {
                         measurements,
                         compartments
                     )
+                }
+            }
+
+            if (percentiles) {
+                println 'Adding intensity percentiles...'
+                def percentileList = percentiles.split(',').collect { it as Double }
+                GParsPool.withPool(threads) {
+                    pathObjects.eachParallel { pathObject ->
+                        addPercentileMeasurements(
+                            server,
+                            pathObject,
+                            downsampleFactor,
+                            percentileList
+                        )
+                    }
                 }
             }
         }

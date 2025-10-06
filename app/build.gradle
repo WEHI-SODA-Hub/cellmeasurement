@@ -40,6 +40,9 @@ dependencies {
     // ImageJ dependency
     implementation libs.imagej
 
+    // Apache Commons Math dependency
+    implementation libs.commons.math
+
     // QuPath dependencies
     implementation 'io.github.qupath:qupath-core:0.5.1'
     implementation 'io.github.qupath:qupath-core-processing:0.5.1'
