@@ -45,7 +45,9 @@ Here is an example of running the app:
     --args="--nuclear-mask=$PWD/app/src/test/resources/synthetic_test_nuclear.tiff \
             --whole-cell-mask=$PWD/app/src/test/resources/synthetic_test_whole-cell.tiff \
             --tiff-file=$PWD/app/src/test/resources/synthetic_test.ome.tif \
-            --output-file=$PWD/segmentation.geojson"
+            --output-file=$PWD/segmentation.geojson \
+            --skip-measurements=false \
+            --percentiles=70,80,90,95,96,97,98,99"
 ```
 
 Make sure to use absolute paths.
@@ -54,16 +56,19 @@ Full arguments:
 
 ```
 Usage: cellmeasurement [-hV] [--skip-measurements] [-d=<downsampleFactor>]
-                       [-e=<cellExpansion>] [-i=<distThreshold>]
-                       -n=<nuclearMaskFilePath> -o=<outputFilePath>
-                       [-p=<pixelSizeMicrons>] -t=<tiffFilePath>
+                       [-e=<estimateCellBoundaryDist>] -f=<tiffFilePath>
+                       [-i=<distThreshold>] -n=<nuclearMaskFilePath>
+                       -o=<outputFilePath> [-p=<pixelSizeMicrons>]
+                       [--percentiles=<percentiles>] [-t=<threads>]
                        -w=<wholeCellMaskFilePath>
 Extract cell measurements from nuclear and whole-cell segmentation masks.
   -d, --downsample-factor=<downsampleFactor>
                             Downsample factor
-  -e, --cell-expansion=<cellExpansion>
-                            Expansion factor for cell boundary estimation in
-                              pixels (default = 3.0)
+  -e, --estimate-cell-boundary-dist=<estimateCellBoundaryDist>
+                            Where no matching membrane ROI exists, expand the
+                              nucleus by this many pixels (default = 3.0)
+  -f, --tiff-file=<tiffFilePath>
+                            TIFF file containing multi-channel image data
   -h, --help                Show this help message and exit.
   -i, --dist-threshold=<distThreshold>
                             Distance threshold (in pixels) for matching ROIs
@@ -73,9 +78,13 @@ Extract cell measurements from nuclear and whole-cell segmentation masks.
                             Output path for GeoJSON file
   -p, --pixel-size-microns=<pixelSizeMicrons>
                             Pixel size in microns (default: 0.5)
+      --percentiles=<percentiles>
+                            Calculate specified comma-separated intensity
+                              percentiles. Only works if not skipping
+                              measurements. E.g. "70,80,90,95,96,97,98,99"
       --skip-measurements   Skip adding measurements
-  -t, --tiff-file=<tiffFilePath>
-                            TIFF file containing multi-channel image data
+  -t, --threads=<threads>   Number of threads to use for parallel processing
+                              (default: 1)
   -V, --version             Print version information and exit.
   -w, --whole-cell-mask=<wholeCellMaskFilePath>
                             Whole-cell segmentation mask file in TIFF format
