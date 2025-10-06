@@ -387,8 +387,8 @@ class App implements Runnable {
 
         percentiles.each { percentile ->
             def value = stats.getPercentile(percentile)
-            def capitalisedCompartment = compartment.toLowerCase().capitalize()
-            def measurementName = "${channelName}: ${capitalisedCompartment}: Percentile: ${percentile}"
+            def compartmentName = compartment.toLowerCase().capitalize()
+            def measurementName = "${channelName}: ${compartmentName}: Percentile: ${percentile}"
             measurements.putMeasurement(measurementName, value)
         }
     }
@@ -482,7 +482,7 @@ class App implements Runnable {
                 }
             }
 
-            if (percentiles != '') {
+            if (percentiles) {
                 println 'Adding intensity percentiles...'
                 def percentileList = percentiles.split(',').collect { it as Double }
                 GParsPool.withPool(threads) {
