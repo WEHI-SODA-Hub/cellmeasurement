@@ -84,9 +84,9 @@ class App implements Runnable {
     boolean skipMeasurements = false
 
     @Option(names = ['--percentiles'],
-            description = 'Calculate intensity percentiles. Only works if not skipping measurements.',
+            description = 'Calculate specified comma-separated intensity percentiles. Only works if not skipping measurements. E.g. "70,80,90,95,96,97,98,99"',
             required = false)
-    boolean percentiles = false
+    String percentiles = ''
 
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
@@ -482,14 +482,16 @@ class App implements Runnable {
                 }
             }
 
-            if (percentiles) {
+            if (percentiles != '') {
                 println 'Adding intensity percentiles...'
+                def percentileList = percentiles.split(',').collect { it as Double }
                 GParsPool.withPool(threads) {
                     pathObjects.eachParallel { pathObject ->
                         addPercentileMeasurements(
                             server,
                             pathObject,
-                            downsampleFactor
+                            downsampleFactor,
+                            percentileList
                         )
                     }
                 }
