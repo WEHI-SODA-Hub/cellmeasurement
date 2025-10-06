@@ -11,6 +11,7 @@ import java.nio.file.Paths
 import java.nio.file.Files
 import java.awt.geom.Point2D
 import java.net.URI
+import java.awt.image.BufferedImage
 
 import ij.ImagePlus
 import ij.process.ByteProcessor
@@ -279,6 +280,25 @@ class AppSpec extends Specification {
     }
 
     @Unroll
+    def "extractChannelPixels should extract pixels for channel #channel"() {
+        given:
+        def img = createMockBufferedImage(2, 2, channel, expectedValue)
+
+        when:
+        def pixels = app.extractChannelPixels(img, channel, 2, 2)
+
+        then:
+        pixels.length == 4
+        pixels.every { it == expectedValue }
+
+        where:
+        channel | expectedValue
+        0       | 100.0f
+        1       | 200.0f
+        2       | 50.0f
+    }
+
+    @Unroll
     def "addPercentileMeasurementsForCompartment should add measurements for percentiles #percentiles"() {
         given:
         def measurements = Mock(MeasurementList)
@@ -355,10 +375,24 @@ class AppSpec extends Specification {
         return server
     }
 
+    def createMockBufferedImage(int width, int height, int targetChannel, float expectedValue) {
+        def image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        def raster = image.getRaster()
+
+        // Fill the target channel with expected values
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                raster.setSample(x, y, targetChannel, expectedValue)
+            }
+        }
+
+        return image
+    }
+
     private PathImage getPathImage(URI imageUri) {
         def builder = new BioFormatsServerBuilder()
         def server = builder.buildServer(imageUri)
-        
+
         def request = RegionRequest.createInstance(
             server.getPath(),
             1.0, 0, 0, server.getWidth(), server.getHeight()
