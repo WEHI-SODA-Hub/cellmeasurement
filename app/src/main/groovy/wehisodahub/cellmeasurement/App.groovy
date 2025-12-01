@@ -88,6 +88,11 @@ class App implements Runnable {
             required = false)
     String percentiles = ''
 
+    @Option(names = ['--erosion-steps'],
+            description = 'Comma-separated erosion steps in pixels. Default: 4,7,11,14,18. Set to empty to disable.',
+            required = false)
+    String erosionSteps = '4,7,11,14,18'
+
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
             required = false)
@@ -393,6 +398,117 @@ class App implements Runnable {
         }
     }
 
+    /**
+     * Add erosion-based measurements
+     * @param server ImageServer containing the pixel data
+     * @param pathObject PathObject to measure (must be a cell)
+     * @param downsampleFactor Resolution at which to request pixels
+     * @param erosionSteps List of erosion distances in pixels (must be positive integers)
+     * @param compartments Set of compartments to measure ('CELL', 'NUCLEUS')
+     */
+    def addErosionMeasurements(server, PathObject pathObject, double downsampleFactor,
+                               List<Integer> erosionSteps, Set<String> compartments = ['CELL', 'NUCLEUS']) {
+        try {
+            if (!pathObject.isCell()) return
+            if (erosionSteps == null || erosionSteps.isEmpty()) return
+            
+            def cellROI = pathObject.getROI()
+            def nucleusROI = pathObject.getNucleusROI()
+            if (cellROI == null) return
+            
+            // Get bounding box for the cell
+            def bounds = cellROI.getBoundsX() != Double.POSITIVE_INFINITY ?
+                         new RectangleROI((cellROI.getBoundsX() / downsampleFactor),
+                                          (cellROI.getBoundsY() / downsampleFactor),
+                                          (cellROI.getBoundsWidth() / downsampleFactor + 1),
+                                          (cellROI.getBoundsHeight() / downsampleFactor + 1)) :
+                         new RectangleROI(0, 0, server.getWidth(), server.getHeight())
+            
+            def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
+            def img = server.readRegion(request)
+            if (img == null) return
+            
+            int width = img.getWidth()
+            int height = img.getHeight()
+            def pathImage = IJTools.convertToImagePlus(server, request)
+            def measurements = pathObject.getMeasurementList()
+            
+            // Extract all channel pixel values once (optimization)
+            def allChannelPixels = []
+            for (int c = 0; c < server.nChannels(); c++) {
+                allChannelPixels.add(extractChannelPixels(img, c, width, height))
+            }
+            
+            // Process each compartment
+            compartments.each { compartment ->
+                def roi = (compartment == 'NUCLEUS' && nucleusROI != null) ? nucleusROI : cellROI
+                def baseMask = createROIMask(roi, width, height, pathImage)
+                
+                // Use the first channel's pixel values to count mask area
+                def basePixels = getCompartmentPixels(allChannelPixels[0], baseMask)
+                int baseArea = basePixels.size()
+                
+                if (baseArea == 0) return
+                
+                // Measure at each erosion step
+                erosionSteps.each { steps ->
+                    def erodedMask = erodeMask(baseMask, steps)
+                    
+                    def erodedPixels = getCompartmentPixels(allChannelPixels[0], erodedMask)
+                    int erodedArea = erodedPixels.size()
+                    
+                    def compartmentName = compartment.toLowerCase().capitalize()
+                    
+                    // Add area fraction (only once per erosion step, not per channel)
+                    def areaFraction = erodedArea / (double)baseArea
+                    measurements.putMeasurement(
+                        "${compartmentName}: Eroded_${steps}px: Area_Fraction",
+                        areaFraction
+                    )
+                    
+                    // Add intensity measurements if pixels remain
+                    if (erodedArea > 0) {
+                        for (int c = 0; c < server.nChannels(); c++) {
+                            def channelName = server.getChannel(c).getName()
+                            def channelErodedPixels = getCompartmentPixels(allChannelPixels[c], erodedMask)
+                            
+                            if (channelErodedPixels.size() > 0) {
+                                def stats = new DescriptiveStatistics()
+                                channelErodedPixels.each { stats.addValue(it) }
+                                
+                                measurements.putMeasurement(
+                                    "${channelName}: ${compartmentName}: Eroded_${steps}px: Mean",
+                                    stats.getMean()
+                                )
+                                measurements.putMeasurement(
+                                    "${channelName}: ${compartmentName}: Eroded_${steps}px: Median",
+                                    stats.getPercentile(50)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            println("Error in erosion measurements for ${pathObject}: ${e.getMessage()}")
+        }
+    }
+
+    /**
+     * Erode a binary mask by specified number of pixels
+     * Note: ImageJ's erode() operates on foreground (255) pixels. In our masks, ROI pixels are 255.
+     * However, erosion in ImageJ removes boundary pixels by treating them as background,
+     * which actually expands the 255 region inward. We use dilate() instead which shrinks
+     * the 255 region, giving us the desired erosion effect for our ROI measurements.
+     */
+    def erodeMask(ByteProcessor mask, int erosionSteps) {
+        def eroded = mask.duplicate()
+        for (int i = 0; i < erosionSteps; i++) {
+            eroded.dilate()
+        }
+        return eroded
+    }
+
     @Override
     void run() {
         // Load whole cell mask image
@@ -493,6 +609,25 @@ class App implements Runnable {
                             downsampleFactor,
                             percentileList
                         )
+                    }
+                }
+            }
+
+            if (erosionSteps && erosionSteps.trim()) {
+                println 'Adding erosion measurements...'
+                def erosionList = erosionSteps.split(',').collect { it.trim() as Integer }.findAll { it > 0 }
+                if (erosionList.isEmpty()) {
+                    println 'Warning: No valid positive erosion steps provided, skipping erosion measurements'
+                } else {
+                    GParsPool.withPool(threads) {
+                        pathObjects.eachParallel { pathObject ->
+                            addErosionMeasurements(
+                                server,
+                                pathObject,
+                                downsampleFactor,
+                                erosionList
+                            )
+                        }
                     }
                 }
             }
