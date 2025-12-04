@@ -47,16 +47,36 @@ Here is an example of running the app:
             --tiff-file=$PWD/app/src/test/resources/synthetic_test.ome.tif \
             --output-file=$PWD/segmentation.geojson \
             --skip-measurements=false \
-            --percentiles=70,80,90,95,96,97,98,99"
+            --percentiles=70,80,90,95,96,97,98,99 \
+            --erosion-steps=4,7,11,14,18"
 ```
 
 Make sure to use absolute paths.
+
+### Erosion Measurements
+
+The `--erosion-steps` option enables spatial analysis of marker distribution from cell edges toward the interior. This is useful for:
+
+- **Membrane vs cytoplasm gradients** - detecting membrane-localized receptors vs cytoplasmic proteins
+- **Nuclear envelope analysis** - identifying proteins enriched at the nuclear boundary
+- **Quality control** - detecting edge staining artifacts or segmentation issues
+- **Cell morphology** - characterizing marker distribution patterns
+
+**Default values:** `4,7,11,14,18` pixels (optimized for Lunaphore COMET imaging at 0.28 μm/pixel, corresponding to ~1.1, 2.0, 2.8, 3.9, 5.0 μm)
+
+**Generated measurements:**
+- `{Channel}: {Compartment}: Eroded_{N}px: Mean` - mean intensity after N pixels of erosion
+- `{Channel}: {Compartment}: Eroded_{N}px: Median` - median intensity after N pixels of erosion  
+- `{Compartment}: Eroded_{N}px: Area_Fraction` - fraction of compartment area remaining (0.0 = fully eroded, 1.0 = no erosion)
+
+**Note:** Small cells may have `Area_Fraction = 0.0` at larger erosion steps, which is expected. These measurements can be filtered during analysis. Set `--erosion-steps=""` to disable erosion measurements.
 
 Full arguments:
 
 ```
 Usage: cellmeasurement [-hV] [--skip-measurements] [-d=<downsampleFactor>]
-                       [-e=<estimateCellBoundaryDist>] -f=<tiffFilePath>
+                       [-e=<estimateCellBoundaryDist>]
+                       [--erosion-steps=<erosionSteps>] -f=<tiffFilePath>
                        [-i=<distThreshold>] -n=<nuclearMaskFilePath>
                        -o=<outputFilePath> [-p=<pixelSizeMicrons>]
                        [--percentiles=<percentiles>] [-t=<threads>]
@@ -67,6 +87,9 @@ Extract cell measurements from nuclear and whole-cell segmentation masks.
   -e, --estimate-cell-boundary-dist=<estimateCellBoundaryDist>
                             Where no matching membrane ROI exists, expand the
                               nucleus by this many pixels (default = 3.0)
+      --erosion-steps=<erosionSteps>
+                            Comma-separated erosion steps in pixels. Default:
+                              4,7,11,14,18. Set to empty to disable.
   -f, --tiff-file=<tiffFilePath>
                             TIFF file containing multi-channel image data
   -h, --help                Show this help message and exit.

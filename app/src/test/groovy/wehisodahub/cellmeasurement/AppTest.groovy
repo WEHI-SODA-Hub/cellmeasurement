@@ -316,6 +316,195 @@ class AppSpec extends Specification {
         percentiles << [[50.0], [70.0, 90.0], [95.0, 99.0]]
     }
 
+    def "addErosionMeasurements should return early when pathObject is not a cell"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 20, 20)
+        pathObject.isCell() >> false
+
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, [4, 7])
+
+        then:
+        0 * _
+    }
+
+    def "addErosionMeasurements should return early when erosionSteps is null"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 20, 20)
+        pathObject.isCell() >> true
+
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, null)
+
+        then:
+        0 * server._
+    }
+
+    def "addErosionMeasurements should return early when erosionSteps is empty"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 20, 20)
+        pathObject.isCell() >> true
+
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, [])
+
+        then:
+        0 * server._
+    }
+
+    def "addErosionMeasurements should return early when cellROI is null"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 20, 20)
+        pathObject.isCell() >> true
+        pathObject.getROI() >> null
+
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, [4])
+
+        then:
+        0 * server._
+    }
+
+    @Unroll
+    def "addErosionMeasurements should process cell with #compartments compartments"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 50, 50)
+        pathObject.isCell() >> true
+        
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, [4], compartments as Set)
+
+        then:
+        noExceptionThrown()
+
+        where:
+        compartments << [['CELL'], ['NUCLEUS'], ['CELL', 'NUCLEUS']]
+    }
+
+    @Unroll
+    def "addErosionMeasurements should handle multiple erosion steps #steps"() {
+        given:
+        def server = createMockImageServer(100, 100)
+        def pathObject = createMockPathObject(10, 10, 50, 50)
+        pathObject.isCell() >> true
+        
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, steps)
+
+        then:
+        noExceptionThrown()
+
+        where:
+        steps << [[4], [4, 7], [4, 7, 11, 14]]
+    }
+
+    def "erodeMask should process mask without errors"() {
+        given:
+        def mask = new ByteProcessor(20, 20)
+        // Fill center area with white
+        for (int y = 5; y < 15; y++) {
+            for (int x = 5; x < 15; x++) {
+                mask.set(x, y, 255)
+            }
+        }
+        def originalCount = countNonZeroPixels(mask)
+
+        when:
+        def erodedMask = app.erodeMask(mask, 2)
+        def erodedCount = countNonZeroPixels(erodedMask)
+
+        then:
+        erodedMask != null
+        erodedMask instanceof ByteProcessor
+        erodedMask.getWidth() == 20
+        erodedMask.getHeight() == 20
+        // Dilate produces shrinking effect (erosion) in our masks
+        erodedCount < originalCount
+        erodedCount > 0
+    }
+
+    def "erodeMask with zero steps should return identical mask"() {
+        given:
+        def mask = new ByteProcessor(10, 10)
+        mask.set(5, 5, 255)
+        
+        def originalCount = countNonZeroPixels(mask)
+
+        when:
+        def erodedMask = app.erodeMask(mask, 0)
+        def erodedCount = countNonZeroPixels(erodedMask)
+
+        then:
+        erodedCount == originalCount
+    }
+
+    def "erodeMask with large steps should eliminate small masks"() {
+        given:
+        def mask = new ByteProcessor(10, 10)
+        // Small 3x3 area
+        for (int y = 4; y < 7; y++) {
+            for (int x = 4; x < 7; x++) {
+                mask.set(x, y, 255)
+            }
+        }
+
+        when:
+        def erodedMask = app.erodeMask(mask, 10)
+        def erodedCount = countNonZeroPixels(erodedMask)
+
+        then:
+        // After troubleshooting, large erosion steps should eliminate small regions
+        erodedCount == 0
+    }
+
+    def "getCellBoundingBox should return scaled bounds for valid ROI"() {
+        given:
+        def roi = ROIs.createRectangleROI(100, 200, 50, 60, ImagePlane.getDefaultPlane())
+        def server = createMockImageServer(1000, 1000)
+        def downsampleFactor = 2.0
+
+        when:
+        def bounds = App.getCellBoundingBox(roi, downsampleFactor, server)
+
+        then:
+        bounds.getBoundsX() == 50.0  // 100 / 2
+        bounds.getBoundsY() == 100.0  // 200 / 2
+        bounds.getBoundsWidth() == 26.0  // 50 / 2 + 1
+        bounds.getBoundsHeight() == 31.0  // 60 / 2 + 1
+    }
+
+    def "getCellBoundingBox should return full image bounds for infinite ROI"() {
+        given:
+        def roi = Mock(ROI)
+        roi.getBoundsX() >> Double.POSITIVE_INFINITY
+        def server = createMockImageServer(500, 400)
+        def downsampleFactor = 1.0
+
+        when:
+        def bounds = App.getCellBoundingBox(roi, downsampleFactor, server)
+
+        then:
+        bounds.getBoundsX() == 0.0
+        bounds.getBoundsY() == 0.0
+        bounds.getBoundsWidth() == 500.0
+        bounds.getBoundsHeight() == 400.0
+    }
+
+    // Helper method for erosion tests
+    private int countNonZeroPixels(ByteProcessor mask) {
+        def pixels = mask.getPixels() as byte[]
+        int count = 0
+        for (int i = 0; i < pixels.length; i++) {
+            if (pixels[i] != 0) count++
+        }
+        return count
+    }
+
     def "should process real image files"() {
         given:
         app.downsampleFactor = 1.0
