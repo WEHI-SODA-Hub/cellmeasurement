@@ -89,9 +89,9 @@ class App implements Runnable {
     String percentiles = ''
 
     @Option(names = ['--erosion-steps'],
-            description = 'Comma-separated erosion steps in pixels. Default: 4,7,11,14,18. Set to empty to disable.',
+            description = 'Comma-separated erosion steps in pixels. E.g. "4,7,11,14,18". Set to empty to disable.',
             required = false)
-    String erosionSteps = '4,7,11,14,18'
+    String erosionSteps = ''
 
     @Option(names = ['-i', '--dist-threshold'],
             description = 'Distance threshold (in pixels) for matching ROIs',
@@ -206,6 +206,22 @@ class App implements Runnable {
     }
 
     /**
+     * Create a bounding box RectangleROI for a cell, accounting for downsampling
+     * @param cellROI The cell's region of interest
+     * @param downsampleFactor Resolution factor to apply
+     * @param server ImageServer to get full image dimensions if needed
+     * @return RectangleROI representing the bounding box
+     */
+    static RectangleROI getCellBoundingBox(ROI cellROI, double downsampleFactor, server) {
+        return cellROI.getBoundsX() != Double.POSITIVE_INFINITY ?
+               new RectangleROI((cellROI.getBoundsX() / downsampleFactor),
+                                (cellROI.getBoundsY() / downsampleFactor),
+                                (cellROI.getBoundsWidth() / downsampleFactor + 1),
+                                (cellROI.getBoundsHeight() / downsampleFactor + 1)) :
+               new RectangleROI(0, 0, server.getWidth(), server.getHeight())
+    }
+
+    /**
      * Add percentile measurements for cell objects by compartment
      * @param server ImageServer containing the pixel data
      * @param pathObject PathObject to measure (MeasurementList will be updated)
@@ -231,12 +247,7 @@ class App implements Runnable {
         }
 
         // Get bounding box for the cell
-        def bounds = cellROI.getBoundsX() != Double.POSITIVE_INFINITY ?
-                     new RectangleROI((cellROI.getBoundsX() / downsampleFactor),
-                                      (cellROI.getBoundsY() / downsampleFactor),
-                                      (cellROI.getBoundsWidth() / downsampleFactor + 1),
-                                      (cellROI.getBoundsHeight() / downsampleFactor + 1)) :
-                     new RectangleROI(0, 0, server.getWidth(), server.getHeight())
+        def bounds = getCellBoundingBox(cellROI, downsampleFactor, server)
 
         // Create region request
         def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
@@ -417,12 +428,7 @@ class App implements Runnable {
             if (cellROI == null) return
             
             // Get bounding box for the cell
-            def bounds = cellROI.getBoundsX() != Double.POSITIVE_INFINITY ?
-                         new RectangleROI((cellROI.getBoundsX() / downsampleFactor),
-                                          (cellROI.getBoundsY() / downsampleFactor),
-                                          (cellROI.getBoundsWidth() / downsampleFactor + 1),
-                                          (cellROI.getBoundsHeight() / downsampleFactor + 1)) :
-                         new RectangleROI(0, 0, server.getWidth(), server.getHeight())
+            def bounds = getCellBoundingBox(cellROI, downsampleFactor, server)
             
             def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
             def img = server.readRegion(request)
