@@ -14,6 +14,7 @@ import java.awt.image.BufferedImage
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 
 import ij.IJ
+import ij.ImagePlus
 import ij.process.ColorProcessor
 import ij.process.ByteProcessor
 import ij.process.ImageProcessor
@@ -515,14 +516,30 @@ class App implements Runnable {
         return eroded
     }
 
+    /**
+     * Convert a Bio-Formats ImageServer to an ImageJ ImagePlus
+     * @param server ImageServer to convert
+     * @return ImagePlus containing the image data
+     */
+    static convertServerToImagePlus(server) {
+        def request = RegionRequest.createInstance(server)
+        return IJTools.convertToImagePlus(server, request)
+    }
+
     @Override
     void run() {
-        // Load whole cell mask image
-        def wholeCellImp = IJ.openImage(wholeCellMaskFilePath)
+        // Load whole cell mask using Bio-Formats via QuPath
+        def wholeCellUri = Paths.get(wholeCellMaskFilePath).toUri()
+        def wholeCellBuilder = new BioFormatsServerBuilder()
+        def wholeCellServer = wholeCellBuilder.buildServer(wholeCellUri)
+        def wholeCellImp = convertServerToImagePlus(wholeCellServer).getImage()
         println 'Loaded whole cell mask width: ' + wholeCellImp.getWidth()
 
-        // Load nuclear mask image
-        def nuclearImp = IJ.openImage(nuclearMaskFilePath)
+        // Load nuclear mask using Bio-Formats via QuPath
+        def nuclearUri = Paths.get(nuclearMaskFilePath).toUri()
+        def nuclearBuilder = new BioFormatsServerBuilder()
+        def nuclearServer = nuclearBuilder.buildServer(nuclearUri)
+        def nuclearImp = convertServerToImagePlus(nuclearServer).getImage()
         println 'Loaded nuclear mask width: ' + nuclearImp.getWidth()
 
         // Build a server with supplied TIFF file
