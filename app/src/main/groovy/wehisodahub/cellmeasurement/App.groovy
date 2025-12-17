@@ -13,7 +13,6 @@ import java.awt.image.BufferedImage
 
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 
-import ij.IJ
 import ij.process.ColorProcessor
 import ij.process.ByteProcessor
 import ij.process.ImageProcessor
@@ -515,17 +514,39 @@ class App implements Runnable {
         return eroded
     }
 
+    /**
+     * Convert a Bio-Formats ImageServer to an ImageJ ImagePlus object to ensure compatibility with ROI conversion and feature generation code
+     * @param server ImageServer to convert
+     * @return ImagePlus containing the image data
+     */
+    static convertServerToImagePlus(server) {
+        def request = RegionRequest.createInstance(server)
+        return IJTools.convertToImagePlus(server, request)
+    }
+
+    /**
+     * Load a mask image file using Bio-Formats and convert to ImagePlus
+     * @param filePath Path to the mask image file
+     * @return ImagePlus containing the mask image data
+     */
+    static loadMaskAsImagePlus(String filePath) {
+        def uri = Paths.get(filePath).toUri()
+        def builder = new BioFormatsServerBuilder()
+        def server = builder.buildServer(uri)
+        return convertServerToImagePlus(server).getImage()
+    }
+
     @Override
     void run() {
-        // Load whole cell mask image
-        def wholeCellImp = IJ.openImage(wholeCellMaskFilePath)
+        // Load whole cell mask using Bio-Formats via QuPath, more robust than ImageJ for very large images
+        def wholeCellImp = loadMaskAsImagePlus(wholeCellMaskFilePath)
         println 'Loaded whole cell mask width: ' + wholeCellImp.getWidth()
 
-        // Load nuclear mask image
-        def nuclearImp = IJ.openImage(nuclearMaskFilePath)
+        // Load nuclear mask using Bio-Formats via QuPath, more robust than ImageJ for very large images
+        def nuclearImp = loadMaskAsImagePlus(nuclearMaskFilePath)
         println 'Loaded nuclear mask width: ' + nuclearImp.getWidth()
 
-        // Build a server with supplied TIFF file
+        // Build a server with supplied TIFF file using bioformats
         def uri = Paths.get(tiffFilePath).toUri()
         def builder = new BioFormatsServerBuilder()
         def server = builder.buildServer(uri)
