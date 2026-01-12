@@ -310,7 +310,7 @@ class AppSpec extends Specification {
         app.addPercentileMeasurementsForCompartment(measurements, pixels, channelName, compartment, percentiles)
 
         then:
-        percentiles.size() * measurements.putMeasurement(_, _)
+        percentiles.size() * measurements.put(_, _)
 
         where:
         percentiles << [[50.0], [70.0, 90.0], [95.0, 99.0]]
