@@ -404,7 +404,7 @@ class App implements Runnable {
             def value = stats.getPercentile(percentile)
             def compartmentName = compartment.toLowerCase().capitalize()
             def measurementName = "${channelName}: ${compartmentName}: Percentile: ${percentile}"
-            measurements.putMeasurement(measurementName, value)
+            measurements.put(measurementName, value)
         }
     }
 
