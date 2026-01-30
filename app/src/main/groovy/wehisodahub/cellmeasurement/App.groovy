@@ -28,6 +28,7 @@ import qupath.lib.scripting.QP
 import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
 import qupath.lib.objects.CellTools
+import qupath.lib.objects.PathObjectTools
 import qupath.lib.regions.ImagePlane
 import qupath.lib.regions.RegionRequest
 import qupath.lib.io.PathIO.GeoJsonExportOptions
@@ -35,6 +36,8 @@ import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.measurements.MeasurementList
 import qupath.lib.images.servers.PixelCalibration
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
+
+import org.locationtech.jts.simplify.DouglasPeuckerSimplifier
 
 /**
 * Entry point for the cell measurement application.
@@ -81,6 +84,11 @@ class App implements Runnable {
             description = 'Skip adding measurements',
             required = false)
     boolean skipMeasurements = false
+
+    @Option(names = ['--simplify-rois'],
+            description = 'Simplify ROIs, can be used to speed up processing of complex masks',
+            required = false)
+    boolean simplifyROIs = false
 
     @Option(names = ['--percentiles'],
             description = 'Calculate specified comma-separated intensity percentiles. Only works if not skipping measurements. E.g. "70,80,90,95,96,97,98,99"',
@@ -284,6 +292,24 @@ class App implements Runnable {
 
         } catch (Exception e) {
             println("Error processing ${pathObject}: ${e.getMessage()}")
+        }
+    }
+
+    /**
+     * Simplify a ROI using Douglas-Peucker algorithm
+     * @param roi ROI to simplify
+     * @param tolerance Douglas-Peucker tolerance in pixels
+     * @return Simplified ROI
+     */
+    static ROI simplifyROI(ROI roi, double tolerance = 0.5) {
+        if (roi == null) return null
+        try {
+            def geometry = roi.getGeometry()
+            def simplified = DouglasPeuckerSimplifier.simplify(geometry, tolerance)
+            return GeometryTools.geometryToROI(simplified, roi.getImagePlane())
+        } catch (Exception e) {
+            println "Warning: Could not simplify ROI, using original: ${e.message}"
+            return roi
         }
     }
 
@@ -559,6 +585,20 @@ class App implements Runnable {
         //[wholeCellROIs,nuclearROIs].transpose().collect { a, b -> println a ; println b }
         println 'Total whole cell ROIs: ' + wholeCellROIs.size()
         println 'Total nuclear ROIs: ' + nuclearROIs.size()
+
+        if (simplifyROIs) {
+            println 'Simplifying ROIs...'
+            GParsPool.withPool(threads) {
+                wholeCellROIs = wholeCellROIs.collectParallel { pathObject ->
+                    simplifyROI(pathObject, 0.5)
+                }
+                nuclearROIs = nuclearROIs.collectParallel { pathObject ->
+                    simplifyROI(pathObject, 0.5)
+                }
+            }
+            println "Simplified ${wholeCellROIs.size()} whole cell ROIs"
+            println "Simplified ${nuclearROIs.size()} nuclear ROIs"
+        }
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
         def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist)
