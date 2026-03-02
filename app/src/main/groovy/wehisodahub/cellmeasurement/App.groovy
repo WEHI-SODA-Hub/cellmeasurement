@@ -90,6 +90,11 @@ class App implements Runnable {
             required = false)
     boolean simplifyROIs = false
 
+    @Option(names = ['--tolerance'],
+            description = 'Use this tolerance value when simplifying ROIs, must be greater than 0. Default: 0.5',
+            required = false)
+    BigDecimal simplifyTolerance = 0.5
+
     @Option(names = ['--percentiles'],
             description = 'Calculate specified comma-separated intensity percentiles. Only works if not skipping measurements. E.g. "70,80,90,95,96,97,98,99"',
             required = false)
@@ -586,14 +591,14 @@ class App implements Runnable {
         println 'Total whole cell ROIs: ' + wholeCellROIs.size()
         println 'Total nuclear ROIs: ' + nuclearROIs.size()
 
-        if (simplifyROIs) {
-            println 'Simplifying ROIs...'
+        if (simplifyROIs && simplifyTolerance > 0) {
+            println 'Simplifying ROIs with tolerance: ' + simplifyTolerance
             GParsPool.withPool(threads) {
                 wholeCellROIs = wholeCellROIs.collectParallel { pathObject ->
-                    simplifyROI(pathObject, 0.5)
+                    simplifyROI(pathObject, simplifyTolerance)
                 }
                 nuclearROIs = nuclearROIs.collectParallel { pathObject ->
-                    simplifyROI(pathObject, 0.5)
+                    simplifyROI(pathObject, simplifyTolerance)
                 }
             }
             println "Simplified ${wholeCellROIs.size()} whole cell ROIs"
