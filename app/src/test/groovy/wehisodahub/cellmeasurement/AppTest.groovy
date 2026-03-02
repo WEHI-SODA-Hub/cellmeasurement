@@ -89,6 +89,89 @@ class AppSpec extends Specification {
         result.isEmpty()
     }
 
+    def "should return null when ROI is null"() {
+        when:
+        def result = App.simplifyROI(null, 0.5)
+
+        then:
+        result == null
+    }
+
+    def "should reduce point count with higher tolerance"() {
+        given: "a complex polygon with many points"
+        def numPoints = 100
+        def x = (0..numPoints).collect { it * 10 + Math.sin(it * 0.1) * 2 } as double[]
+        def y = (0..numPoints).collect { 50 + Math.cos(it * 0.1) * 2 } as double[]
+        def roi = ROIs.createPolygonROI(x, y, ImagePlane.getDefaultPlane())
+        def originalPoints = roi.getNumPoints()
+
+        when:
+        def simplifiedLow = App.simplifyROI(roi, 0.5)
+        def simplifiedMid = App.simplifyROI(roi, 2.0)
+        def simplifiedHigh = App.simplifyROI(roi, 5.0)
+
+        then: "higher tolerance produces fewer points"
+        simplifiedLow.getNumPoints() >= simplifiedMid.getNumPoints()
+        simplifiedMid.getNumPoints() >= simplifiedHigh.getNumPoints()
+        simplifiedHigh.getNumPoints() < originalPoints
+        simplifiedHigh.getNumPoints() > 2 // Should still retain shape
+    }
+
+    def "should preserve ImagePlane information"() {
+        given: "a polygon on a specific z and t plane"
+        def plane = ImagePlane.getPlane(2, 5)
+        def x = [10, 100, 100, 10] as double[]
+        def y = [10, 10, 100, 100] as double[]
+        def roi = ROIs.createPolygonROI(x, y, plane)
+
+        when:
+        def simplified = App.simplifyROI(roi, 0.5)
+
+        then:
+        simplified.getImagePlane() == plane
+        simplified.getZ() == 2
+        simplified.getT() == 5
+    }
+
+    def "should preserve area within tolerance for #roiType"() {
+        given:
+        def roi = createROI(roiType)
+        def originalArea = roi.getArea()
+
+        when:
+        def simplified = App.simplifyROI(roi, tolerance)
+        def simplifiedArea = simplified.getArea()
+        def areaChange = Math.abs(simplifiedArea - originalArea) / originalArea * 100
+
+        then:
+        simplified != null
+        areaChange < maxAreaChange
+
+        where:
+        roiType     | tolerance | maxAreaChange
+        "polygon"   | 0.5       | 1.0
+        "ellipse"   | 1.0       | 5.0
+        "rectangle" | 0.5       | 0.1
+    }
+
+    def "should handle different ROI types without error"() {
+        when:
+        def simplified = App.simplifyROI(roi, 1.0)
+
+        then:
+        simplified != null
+        noExceptionThrown()
+
+        where:
+        roi << [
+            ROIs.createPolygonROI([10, 100, 100, 10] as double[], [10, 10, 100, 100] as double[], ImagePlane.getDefaultPlane()),
+            ROIs.createEllipseROI(100, 100, 50, 30, ImagePlane.getDefaultPlane()),
+            ROIs.createRectangleROI(10, 10, 100, 50, ImagePlane.getDefaultPlane()),
+            ROIs.createPolylineROI([10, 50, 100] as double[], [10, 30, 25] as double[], ImagePlane.getDefaultPlane()),
+            ROIs.createPointsROI([50] as double[], [50] as double[], ImagePlane.getDefaultPlane())
+        ]
+    }
+
     def "findNearestROI should return null when no ROIs within threshold"() {
         given:
         def centroid = new Point2D.Double(50, 50)
@@ -540,6 +623,21 @@ class AppSpec extends Specification {
         def file = tempDir.resolve(filename)
         Files.createFile(file)
         return file.toString()
+    }
+
+    private ROI createROI(String type) {
+        switch(type) {
+            case "polygon":
+                def x = [0, 100, 100, 0] as double[]
+                def y = [0, 0, 100, 100] as double[]
+                return ROIs.createPolygonROI(x, y, ImagePlane.getDefaultPlane())
+            case "ellipse":
+                return ROIs.createEllipseROI(100, 100, 50, 30, ImagePlane.getDefaultPlane())
+            case "rectangle":
+                return ROIs.createRectangleROI(10, 10, 100, 50, ImagePlane.getDefaultPlane())
+            default:
+                throw new IllegalArgumentException("Unknown ROI type: ${type}")
+        }
     }
 
     private ROI createMockROI(double centroidX, double centroidY) {
