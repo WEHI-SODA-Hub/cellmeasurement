@@ -37,6 +37,8 @@ import qupath.lib.measurements.MeasurementList
 import qupath.lib.images.servers.PixelCalibration
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 
+import org.locationtech.jts.geom.Envelope
+import org.locationtech.jts.index.strtree.STRtree
 import org.locationtech.jts.simplify.DouglasPeuckerSimplifier
 
 /**
@@ -151,8 +153,11 @@ class App implements Runnable {
     * Create cell objects from matched nuclear and whole cell ROIs.
     */
     static List<PathObject> makeCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
-                                              BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist) {
-        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, estimateCellBoundaryDist)
+                                              BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist,
+                                              threads = 1) {
+        def matchedPairs = matchROIs(
+            nuclearROIs, wholeCellROIs, distThreshold, estimateCellBoundaryDist, threads
+        )
         def pathObjects = matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
@@ -163,22 +168,59 @@ class App implements Runnable {
 
     /**
     * Match nuclear ROIs to whole cell ROIs based on distance between centroids.
-    * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion
+    * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion.
+    * Uses an STRtree spatial index over whole-cell centroids to avoid an O(N×M)
+    * linear scan — each nucleus queries only candidates within distThreshold.
     */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
                                      BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist,
                                      threads = 1) {
+        // Build spatial index once over whole-cell centroids — O(M log M), read-only so thread-safe
+        def index = new STRtree()
+        wholeCellROIs.each { roi ->
+            double cx = roi.getCentroidX()
+            double cy = roi.getCentroidY()
+            index.insert(new Envelope(cx, cx, cy, cy), roi)
+        }
+        index.build()
+
         GParsPool.withPool(threads) {
             nuclearROIs.collectParallel { nuclearROI ->
-                def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
-                def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
+                def nearestCell = findNearestROI(nuclearROI, index, distThreshold as double)
                 if (nearestCell == null) {
-                    def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), estimateCellBoundaryDist, 1.0)
+                    def geom = CellTools.estimateCellBoundary(
+                        nuclearROI.getGeometry(), estimateCellBoundaryDist, 1.0
+                    )
                     nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
                 }
                 return [nuclearROI, nearestCell]
             }
         }
+    }
+
+    /**
+    * Find the nearest ROI to a given nuclear ROI's centroid using a pre-built STRtree spatial index.
+    * Queries only candidates within distThreshold bounding box, then applies exact distance check.
+    */
+    static ROI findNearestROI(ROI nuclearROI, STRtree index, double distThreshold) {
+        double cx = nuclearROI.getCentroidX()
+        double cy = nuclearROI.getCentroidY()
+        def searchEnv = new Envelope(cx - distThreshold, cx + distThreshold,
+                                     cy - distThreshold, cy + distThreshold)
+        def candidates = index.query(searchEnv)
+
+        ROI nearestROI = null
+        double minDistance = Double.MAX_VALUE
+        candidates.each { roi ->
+            double distance = Math.sqrt(
+                Math.pow(cx - roi.getCentroidX(), 2) + Math.pow(cy - roi.getCentroidY(), 2)
+            )
+            if (distance < minDistance && distance < distThreshold) {
+                minDistance = distance
+                nearestROI = roi
+            }
+        }
+        return nearestROI
     }
 
     /**
@@ -234,60 +276,76 @@ class App implements Runnable {
     }
 
     /**
+     * Load image data for a cell once, to be shared across multiple measurement types.
+     * Reads the image region, creates compartment masks, and pre-extracts all channel pixel arrays.
+     * @param server ImageServer containing the pixel data
+     * @param pathObject PathObject (must be a cell)
+     * @param downsampleFactor Resolution at which to request pixels
+     * @param compartments Set of compartment masks to create ('CELL', 'NUCLEUS', 'CYTOPLASM', 'MEMBRANE')
+     * @return Map with keys: masks (Map), allChannelPixels (List<float[]>); or null if loading fails
+     */
+    def loadCellData(server, PathObject pathObject, double downsampleFactor,
+                     Set<String> compartments = ['CELL', 'NUCLEUS', 'CYTOPLASM', 'MEMBRANE']) {
+        if (!pathObject.isCell()) return null
+
+        def cellROI = pathObject.getROI()
+        def nucleusROI = pathObject.getNucleusROI()
+        if (cellROI == null) return null
+
+        def bounds = getCellBoundingBox(cellROI, downsampleFactor, server)
+        def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
+        def img = server.readRegion(request)
+        if (img == null) return null
+
+        int width = img.getWidth()
+        int height = img.getHeight()
+        def pathImage = IJTools.convertToImagePlus(server, request)
+        def masks = createCompartmentMasks(cellROI, nucleusROI, width, height, pathImage, compartments)
+        def allChannelPixels = (0..<server.nChannels()).collect {
+            c -> extractChannelPixels(img, c, width, height)
+        }
+
+        return [masks: masks, allChannelPixels: allChannelPixels]
+    }
+
+    /**
      * Add percentile measurements for cell objects by compartment
      * @param server ImageServer containing the pixel data
      * @param pathObject PathObject to measure (MeasurementList will be updated)
      * @param downsampleFactor Resolution at which to request pixels
      * @param percentiles List of percentiles to calculate (default: [70, 80, 90, 95, 96, 97, 98, 99])
      * @param compartments Set of compartments to measure ('NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL')
+     * @param cellData Optional pre-loaded cell data from loadCellData(); if null, data is loaded internally
      */
     def addPercentileMeasurements(server, PathObject pathObject, double downsampleFactor = 1.0,
                                   List<Double> percentiles = [70, 80, 90, 95, 96, 97, 98, 99],
-                                  Set<String> compartments = ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL']) {
+                                  Set<String> compartments = ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL'],
+                                  Map cellData = null) {
 
         // Only process cells
         if (!pathObject.isCell()) {
             return
         }
 
-        def cell = pathObject
-        def cellROI = cell.getROI()
-        def nucleusROI = cell.getNucleusROI()
-
-        if (cellROI == null) {
+        if (pathObject.getROI() == null) {
             return
         }
 
-        // Get bounding box for the cell
-        def bounds = getCellBoundingBox(cellROI, downsampleFactor, server)
-
-        // Create region request
-        def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
-
         try {
-            // Get the image data
-            def img = server.readRegion(request)
-            if (img == null) return
+            def data = cellData ?: loadCellData(server, pathObject, downsampleFactor, compartments)
+            if (data == null) return
 
-            int width = img.getWidth()
-            int height = img.getHeight()
+            def measurements = pathObject.getMeasurementList()
             int nChannels = server.nChannels()
-
-            // Create compartment masks
-            def pathImage = IJTools.convertToImagePlus(server, request);
-            def masks = createCompartmentMasks(cellROI, nucleusROI, width, height, pathImage, compartments)
-
-            // Extract pixel values for each channel and compartment
-            def measurements = cell.getMeasurementList()
 
             for (int c = 0; c < nChannels; c++) {
                 def channelName = server.getChannel(c).getName()
-                def pixelValues = extractChannelPixels(img, c, width, height)
+                def pixelValues = data.allChannelPixels[c]
 
-                masks.each { compartment, mask ->
+                data.masks.each { compartment, mask ->
                     if (compartments.contains(compartment)) {
                         def compartmentPixels = getCompartmentPixels(pixelValues, mask)
-                        if (compartmentPixels.size() > 0) {
+                        if (compartmentPixels.length > 0) {
                             addPercentileMeasurementsForCompartment(measurements, compartmentPixels,
                                                                     channelName, compartment, percentiles)
                         }
@@ -392,32 +450,28 @@ class App implements Runnable {
     }
 
     /**
-     * Extract pixel values for a specific channel
+     * Extract pixel values for a specific channel using a bulk raster read.
      */
     def extractChannelPixels(BufferedImage img, int channel, int width, int height) {
-        def pixels = new float[width * height]
-        def raster = img.getRaster()
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                pixels[y * width + x] = raster.getSampleFloat(x, y, channel)
-            }
-        }
-
-        return pixels
+        return img.getRaster().getSamples(0, 0, width, height, channel, (float[]) null)
     }
 
     /**
-     * Get pixel values within a compartment mask
+     * Get pixel values within a compartment mask as a primitive double array, avoiding boxing overhead.
      */
     def getCompartmentPixels(float[] allPixels, ByteProcessor mask) {
         def maskPixels = mask.getPixels() as byte[]
-        def compartmentPixels = []
 
+        // Count non-zero mask pixels first to allocate exact array size
+        int count = 0
         for (int i = 0; i < maskPixels.length; i++) {
-            if (maskPixels[i] != 0) {
-                compartmentPixels.add(allPixels[i] as double)
-            }
+            if (maskPixels[i] != 0) count++
+        }
+
+        double[] compartmentPixels = new double[count]
+        int j = 0
+        for (int i = 0; i < maskPixels.length; i++) {
+            if (maskPixels[i] != 0) compartmentPixels[j++] = allPixels[i]
         }
 
         return compartmentPixels
@@ -426,10 +480,9 @@ class App implements Runnable {
     /**
      * Calculate and add percentile measurements for a compartment
      */
-    def addPercentileMeasurementsForCompartment(MeasurementList measurements, List<Double> pixels,
+    def addPercentileMeasurementsForCompartment(MeasurementList measurements, double[] pixels,
                                                String channelName, String compartment, List<Double> percentiles) {
-        def stats = new DescriptiveStatistics()
-        pixels.each { stats.addValue(it) }
+        def stats = new DescriptiveStatistics(pixels)
 
         percentiles.each { percentile ->
             def value = stats.getPercentile(percentile)
@@ -446,9 +499,11 @@ class App implements Runnable {
      * @param downsampleFactor Resolution at which to request pixels
      * @param erosionSteps List of erosion distances in pixels (must be positive integers)
      * @param compartments Set of compartments to measure ('CELL', 'NUCLEUS')
+     * @param cellData Optional pre-loaded cell data from loadCellData(); if null, data is loaded internally
      */
     def addErosionMeasurements(server, PathObject pathObject, double downsampleFactor,
-                               List<Integer> erosionSteps, Set<String> compartments = ['CELL', 'NUCLEUS']) {
+                               List<Integer> erosionSteps, Set<String> compartments = ['CELL', 'NUCLEUS'],
+                               Map cellData = null) {
         try {
             if (!pathObject.isCell()) return
             if (erosionSteps == null || erosionSteps.isEmpty()) return
@@ -456,42 +511,39 @@ class App implements Runnable {
             def cellROI = pathObject.getROI()
             def nucleusROI = pathObject.getNucleusROI()
             if (cellROI == null) return
-            
-            // Get bounding box for the cell
-            def bounds = getCellBoundingBox(cellROI, downsampleFactor, server)
-            
-            def request = RegionRequest.createInstance(server.getPath(), downsampleFactor, bounds)
-            def img = server.readRegion(request)
-            if (img == null) return
-            
-            int width = img.getWidth()
-            int height = img.getHeight()
-            def pathImage = IJTools.convertToImagePlus(server, request)
+
+            def data = cellData ?: loadCellData(server, pathObject, downsampleFactor, compartments)
+            if (data == null) return
+
             def measurements = pathObject.getMeasurementList()
-            
-            // Extract all channel pixel values once (optimization)
-            def allChannelPixels = []
-            for (int c = 0; c < server.nChannels(); c++) {
-                allChannelPixels.add(extractChannelPixels(img, c, width, height))
-            }
-            
+
             // Process each compartment
             compartments.each { compartment ->
-                def roi = (compartment == 'NUCLEUS' && nucleusROI != null) ? nucleusROI : cellROI
-                def baseMask = createROIMask(roi, width, height, pathImage)
+                def baseMask = (compartment == 'NUCLEUS' && nucleusROI != null)
+                               ? data.masks['NUCLEUS']
+                               : data.masks['CELL']
+                if (baseMask == null) return
                 
                 // Use the first channel's pixel values to count mask area
-                def basePixels = getCompartmentPixels(allChannelPixels[0], baseMask)
-                int baseArea = basePixels.size()
+                def basePixels = getCompartmentPixels(data.allChannelPixels[0], baseMask)
+                int baseArea = basePixels.length
                 
                 if (baseArea == 0) return
                 
-                // Measure at each erosion step
-                erosionSteps.each { steps ->
-                    def erodedMask = erodeMask(baseMask, steps)
-                    
-                    def erodedPixels = getCompartmentPixels(allChannelPixels[0], erodedMask)
-                    int erodedArea = erodedPixels.size()
+                // Erode incrementally through sorted steps, reusing each prior erosion result.
+                // e.g. for steps [4,7,11]: apply 4 dilations, then 3 more, then 4 more (17 total)
+                // rather than 4+7+11=22 dilations if computed from baseMask each time.
+                def sortedSteps = erosionSteps.toSorted()
+                def currentMask = baseMask
+                int prevSteps = 0
+
+                sortedSteps.each { steps ->
+                    int additionalSteps = steps - prevSteps
+                    currentMask = erodeMask(currentMask, additionalSteps)
+                    prevSteps = steps
+
+                    def erodedPixels = getCompartmentPixels(data.allChannelPixels[0], currentMask)
+                    int erodedArea = erodedPixels.length
                     
                     def compartmentName = compartment.toLowerCase().capitalize()
                     
@@ -506,11 +558,10 @@ class App implements Runnable {
                     if (erodedArea > 0) {
                         for (int c = 0; c < server.nChannels(); c++) {
                             def channelName = server.getChannel(c).getName()
-                            def channelErodedPixels = getCompartmentPixels(allChannelPixels[c], erodedMask)
+                            def channelErodedPixels = getCompartmentPixels(data.allChannelPixels[c], currentMask)
                             
-                            if (channelErodedPixels.size() > 0) {
-                                def stats = new DescriptiveStatistics()
-                                channelErodedPixels.each { stats.addValue(it) }
+                            if (channelErodedPixels.length > 0) {
+                                def stats = new DescriptiveStatistics(channelErodedPixels)
                                 
                                 measurements.putMeasurement(
                                     "${channelName}: ${compartmentName}: Eroded_${steps}px: Mean",
@@ -606,7 +657,9 @@ class App implements Runnable {
         }
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
-        def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist)
+        def pathObjects = makeCellObjects(
+            wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist, threads
+        )
         println 'Total path objects: ' + pathObjects.size()
 
         // Filter out any cells that have a membrane outside of the image bounds
@@ -616,28 +669,10 @@ class App implements Runnable {
 
         if (!skipMeasurements) {
             // Set the pixel calibration
-            PixelCalibration cal = new PixelCalibration.Builder()
+            PixelCalibration pixelCalibration = new PixelCalibration.Builder()
                 .pixelSizeMicrons(pixelSizeMicrons, pixelSizeMicrons)
                 .build()
-            println 'Set pixel calibration: ' + cal
-
-            println 'Adding cell measurements...'
-            GParsPool.withPool(threads) {
-                // Add cell shape measurements
-                pathObjects.eachParallel { pathObject ->
-                    ObjectMeasurements.addShapeMeasurements(
-                        pathObject,
-                        cal,
-                        ObjectMeasurements.ShapeFeatures.AREA,
-                        ObjectMeasurements.ShapeFeatures.CIRCULARITY,
-                        ObjectMeasurements.ShapeFeatures.LENGTH,
-                        ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
-                        ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
-                        ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
-                        ObjectMeasurements.ShapeFeatures.SOLIDITY
-                    )
-                }
-            }
+            println 'Set pixel calibration: ' + pixelCalibration
 
             // Define measurements
             def measurements = [
@@ -656,10 +691,39 @@ class App implements Runnable {
                 ObjectMeasurements.Compartments.NUCLEUS
             ]
 
-            println 'Adding intensity measurements...'
+            // Pre-parse optional measurement parameters before entering the parallel block
+            def percentileList = percentiles ? percentiles.split(',').collect { it as Double } : null
+            def erosionList = null
+            if (erosionSteps && erosionSteps.trim()) {
+                def parsedSteps = erosionSteps.split(',').collect { it.trim() as Integer }.findAll { it > 0 }
+                if (parsedSteps.isEmpty()) {
+                    println 'Warning: No valid positive erosion steps provided, skipping erosion measurements'
+                } else {
+                    erosionList = parsedSteps
+                }
+            }
+            if (percentileList) 
+                println 'Will add intensity percentiles: ' + percentileList
+            if (erosionList)
+                println 'Will add erosion measurements at steps: ' + erosionList
+
+            println 'Adding cell measurements...'
             GParsPool.withPool(threads) {
-                // Add intensity measurements
                 pathObjects.eachParallel { pathObject ->
+                    // Shape measurements (geometry only, no image I/O)
+                    ObjectMeasurements.addShapeMeasurements(
+                        pathObject,
+                        pixelCalibration,
+                        ObjectMeasurements.ShapeFeatures.AREA,
+                        ObjectMeasurements.ShapeFeatures.CIRCULARITY,
+                        ObjectMeasurements.ShapeFeatures.LENGTH,
+                        ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
+                        ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
+                        ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
+                        ObjectMeasurements.ShapeFeatures.SOLIDITY
+                    )
+
+                    // Standard intensity measurements (mean, median, min, max, stddev)
                     ObjectMeasurements.addIntensityMeasurements(
                         server,
                         pathObject,
@@ -667,38 +731,36 @@ class App implements Runnable {
                         measurements,
                         compartments
                     )
-                }
-            }
 
-            if (percentiles) {
-                println 'Adding intensity percentiles...'
-                def percentileList = percentiles.split(',').collect { it as Double }
-                GParsPool.withPool(threads) {
-                    pathObjects.eachParallel { pathObject ->
-                        addPercentileMeasurements(
+                    // Load image data once, shared between percentile and erosion measurements
+                    if (percentileList || erosionList) {
+                        def cellData = loadCellData(
                             server,
                             pathObject,
-                            downsampleFactor,
-                            percentileList
+                            (double) downsampleFactor,
+                            ['CELL', 'NUCLEUS', 'CYTOPLASM', 'MEMBRANE'] as Set
                         )
-                    }
-                }
-            }
-
-            if (erosionSteps && erosionSteps.trim()) {
-                println 'Adding erosion measurements...'
-                def erosionList = erosionSteps.split(',').collect { it.trim() as Integer }.findAll { it > 0 }
-                if (erosionList.isEmpty()) {
-                    println 'Warning: No valid positive erosion steps provided, skipping erosion measurements'
-                } else {
-                    GParsPool.withPool(threads) {
-                        pathObjects.eachParallel { pathObject ->
-                            addErosionMeasurements(
-                                server,
-                                pathObject,
-                                downsampleFactor,
-                                erosionList
-                            )
+                        if (cellData != null) {
+                            if (percentileList) {
+                                addPercentileMeasurements(
+                                    server,
+                                    pathObject,
+                                    (double) downsampleFactor,
+                                    percentileList,
+                                    ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL'] as Set,
+                                    cellData
+                                )
+                            }
+                            if (erosionList) {
+                                addErosionMeasurements(
+                                    server,
+                                    pathObject,
+                                    (double) downsampleFactor,
+                                    erosionList,
+                                    ['CELL', 'NUCLEUS'] as Set,
+                                    cellData
+                                )
+                            }
                         }
                     }
                 }
