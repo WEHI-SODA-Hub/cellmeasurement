@@ -493,11 +493,19 @@ class App implements Runnable {
                 
                 if (baseArea == 0) return
                 
-                // Measure at each erosion step
-                erosionSteps.each { steps ->
-                    def erodedMask = erodeMask(baseMask, steps)
-                    
-                    def erodedPixels = getCompartmentPixels(data.allChannelPixels[0], erodedMask)
+                // Erode incrementally through sorted steps, reusing each prior erosion result.
+                // e.g. for steps [4,7,11]: apply 4 dilations, then 3 more, then 4 more (17 total)
+                // rather than 4+7+11=22 dilations if computed from baseMask each time.
+                def sortedSteps = erosionSteps.toSorted()
+                def currentMask = baseMask
+                int prevSteps = 0
+
+                sortedSteps.each { steps ->
+                    int additionalSteps = steps - prevSteps
+                    currentMask = erodeMask(currentMask, additionalSteps)
+                    prevSteps = steps
+
+                    def erodedPixels = getCompartmentPixels(data.allChannelPixels[0], currentMask)
                     int erodedArea = erodedPixels.size()
                     
                     def compartmentName = compartment.toLowerCase().capitalize()
@@ -513,7 +521,7 @@ class App implements Runnable {
                     if (erodedArea > 0) {
                         for (int c = 0; c < server.nChannels(); c++) {
                             def channelName = server.getChannel(c).getName()
-                            def channelErodedPixels = getCompartmentPixels(data.allChannelPixels[c], erodedMask)
+                            def channelErodedPixels = getCompartmentPixels(data.allChannelPixels[c], currentMask)
                             
                             if (channelErodedPixels.size() > 0) {
                                 def stats = new DescriptiveStatistics()
