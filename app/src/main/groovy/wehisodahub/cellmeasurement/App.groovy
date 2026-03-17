@@ -37,6 +37,8 @@ import qupath.lib.measurements.MeasurementList
 import qupath.lib.images.servers.PixelCalibration
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 
+import org.locationtech.jts.geom.Envelope
+import org.locationtech.jts.index.strtree.STRtree
 import org.locationtech.jts.simplify.DouglasPeuckerSimplifier
 
 /**
@@ -151,8 +153,11 @@ class App implements Runnable {
     * Create cell objects from matched nuclear and whole cell ROIs.
     */
     static List<PathObject> makeCellObjects(List<ROI> wholeCellROIs, List<ROI> nuclearROIs,
-                                              BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist) {
-        def matchedPairs = matchROIs(nuclearROIs, wholeCellROIs, distThreshold, estimateCellBoundaryDist)
+                                              BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist,
+                                              threads = 1) {
+        def matchedPairs = matchROIs(
+            nuclearROIs, wholeCellROIs, distThreshold, estimateCellBoundaryDist, threads
+        )
         def pathObjects = matchedPairs.collect { nucleus, cell ->
             if (cell != null) {
                 return PathObjects.createCellObject(cell, nucleus)
@@ -163,22 +168,59 @@ class App implements Runnable {
 
     /**
     * Match nuclear ROIs to whole cell ROIs based on distance between centroids.
-    * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion
+    * Estimate cell boundaries for unmatched nuclear ROIs with cell expansion.
+    * Uses an STRtree spatial index over whole-cell centroids to avoid an O(N×M)
+    * linear scan — each nucleus queries only candidates within distThreshold.
     */
     static List<List<ROI>> matchROIs(List<ROI> nuclearROIs, List<ROI> wholeCellROIs,
                                      BigDecimal distThreshold, BigDecimal estimateCellBoundaryDist,
                                      threads = 1) {
+        // Build spatial index once over whole-cell centroids — O(M log M), read-only so thread-safe
+        def index = new STRtree()
+        wholeCellROIs.each { roi ->
+            double cx = roi.getCentroidX()
+            double cy = roi.getCentroidY()
+            index.insert(new Envelope(cx, cx, cy, cy), roi)
+        }
+        index.build()
+
         GParsPool.withPool(threads) {
             nuclearROIs.collectParallel { nuclearROI ->
-                def nuclearCentroid = new Point2D.Double(nuclearROI.getCentroidX(), nuclearROI.getCentroidY())
-                def nearestCell = findNearestROI(nuclearCentroid, wholeCellROIs, distThreshold)
+                def nearestCell = findNearestROI(nuclearROI, index, distThreshold as double)
                 if (nearestCell == null) {
-                    def geom = CellTools.estimateCellBoundary(nuclearROI.getGeometry(), estimateCellBoundaryDist, 1.0)
+                    def geom = CellTools.estimateCellBoundary(
+                        nuclearROI.getGeometry(), estimateCellBoundaryDist, 1.0
+                    )
                     nearestCell = GeometryTools.geometryToROI(geom, nuclearROI.getImagePlane())
                 }
                 return [nuclearROI, nearestCell]
             }
         }
+    }
+
+    /**
+    * Find the nearest ROI to a given nuclear ROI's centroid using a pre-built STRtree spatial index.
+    * Queries only candidates within distThreshold bounding box, then applies exact distance check.
+    */
+    static ROI findNearestROI(ROI nuclearROI, STRtree index, double distThreshold) {
+        double cx = nuclearROI.getCentroidX()
+        double cy = nuclearROI.getCentroidY()
+        def searchEnv = new Envelope(cx - distThreshold, cx + distThreshold,
+                                     cy - distThreshold, cy + distThreshold)
+        def candidates = index.query(searchEnv)
+
+        ROI nearestROI = null
+        double minDistance = Double.MAX_VALUE
+        candidates.each { roi ->
+            double distance = Math.sqrt(
+                Math.pow(cx - roi.getCentroidX(), 2) + Math.pow(cy - roi.getCentroidY(), 2)
+            )
+            if (distance < minDistance && distance < distThreshold) {
+                minDistance = distance
+                nearestROI = roi
+            }
+        }
+        return nearestROI
     }
 
     /**
@@ -621,7 +663,9 @@ class App implements Runnable {
         }
 
         // Convert QuPath ROIs to objects and add them to the hierarchy
-        def pathObjects = makeCellObjects(wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist)
+        def pathObjects = makeCellObjects(
+            wholeCellROIs, nuclearROIs, distThreshold, estimateCellBoundaryDist, threads
+        )
         println 'Total path objects: ' + pathObjects.size()
 
         // Filter out any cells that have a membrane outside of the image bounds
