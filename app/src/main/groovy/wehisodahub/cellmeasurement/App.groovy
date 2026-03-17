@@ -345,7 +345,7 @@ class App implements Runnable {
                 data.masks.each { compartment, mask ->
                     if (compartments.contains(compartment)) {
                         def compartmentPixels = getCompartmentPixels(pixelValues, mask)
-                        if (compartmentPixels.size() > 0) {
+                        if (compartmentPixels.length > 0) {
                             addPercentileMeasurementsForCompartment(measurements, compartmentPixels,
                                                                     channelName, compartment, percentiles)
                         }
@@ -450,32 +450,28 @@ class App implements Runnable {
     }
 
     /**
-     * Extract pixel values for a specific channel
+     * Extract pixel values for a specific channel using a bulk raster read.
      */
     def extractChannelPixels(BufferedImage img, int channel, int width, int height) {
-        def pixels = new float[width * height]
-        def raster = img.getRaster()
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                pixels[y * width + x] = raster.getSampleFloat(x, y, channel)
-            }
-        }
-
-        return pixels
+        return img.getRaster().getSamples(0, 0, width, height, channel, (float[]) null)
     }
 
     /**
-     * Get pixel values within a compartment mask
+     * Get pixel values within a compartment mask as a primitive double array, avoiding boxing overhead.
      */
     def getCompartmentPixels(float[] allPixels, ByteProcessor mask) {
         def maskPixels = mask.getPixels() as byte[]
-        def compartmentPixels = []
 
+        // Count non-zero mask pixels first to allocate exact array size
+        int count = 0
         for (int i = 0; i < maskPixels.length; i++) {
-            if (maskPixels[i] != 0) {
-                compartmentPixels.add(allPixels[i] as double)
-            }
+            if (maskPixels[i] != 0) count++
+        }
+
+        double[] compartmentPixels = new double[count]
+        int j = 0
+        for (int i = 0; i < maskPixels.length; i++) {
+            if (maskPixels[i] != 0) compartmentPixels[j++] = allPixels[i]
         }
 
         return compartmentPixels
@@ -484,10 +480,9 @@ class App implements Runnable {
     /**
      * Calculate and add percentile measurements for a compartment
      */
-    def addPercentileMeasurementsForCompartment(MeasurementList measurements, List<Double> pixels,
+    def addPercentileMeasurementsForCompartment(MeasurementList measurements, double[] pixels,
                                                String channelName, String compartment, List<Double> percentiles) {
-        def stats = new DescriptiveStatistics()
-        pixels.each { stats.addValue(it) }
+        def stats = new DescriptiveStatistics(pixels)
 
         percentiles.each { percentile ->
             def value = stats.getPercentile(percentile)
@@ -531,7 +526,7 @@ class App implements Runnable {
                 
                 // Use the first channel's pixel values to count mask area
                 def basePixels = getCompartmentPixels(data.allChannelPixels[0], baseMask)
-                int baseArea = basePixels.size()
+                int baseArea = basePixels.length
                 
                 if (baseArea == 0) return
                 
@@ -548,7 +543,7 @@ class App implements Runnable {
                     prevSteps = steps
 
                     def erodedPixels = getCompartmentPixels(data.allChannelPixels[0], currentMask)
-                    int erodedArea = erodedPixels.size()
+                    int erodedArea = erodedPixels.length
                     
                     def compartmentName = compartment.toLowerCase().capitalize()
                     
@@ -565,9 +560,8 @@ class App implements Runnable {
                             def channelName = server.getChannel(c).getName()
                             def channelErodedPixels = getCompartmentPixels(data.allChannelPixels[c], currentMask)
                             
-                            if (channelErodedPixels.size() > 0) {
-                                def stats = new DescriptiveStatistics()
-                                channelErodedPixels.each { stats.addValue(it) }
+                            if (channelErodedPixels.length > 0) {
+                                def stats = new DescriptiveStatistics(channelErodedPixels)
                                 
                                 measurements.putMeasurement(
                                     "${channelName}: ${compartmentName}: Eroded_${steps}px: Mean",

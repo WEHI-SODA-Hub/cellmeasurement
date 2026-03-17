@@ -6,3 +6,9 @@ build
 
 # Mac OS specific files
 .DS_Store
+
+# Ignore test scripts and outputs
+test/
+*logs/
+*.geojson
+*.out

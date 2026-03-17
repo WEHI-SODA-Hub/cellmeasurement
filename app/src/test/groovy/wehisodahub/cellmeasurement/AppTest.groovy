@@ -357,9 +357,9 @@ class AppSpec extends Specification {
         def compartmentPixels = app.getCompartmentPixels(allPixels, mask)
 
         then:
-        compartmentPixels.size() == 2
-        compartmentPixels.contains(10.0d)
-        compartmentPixels.contains(40.0d)
+        compartmentPixels.length == 2
+        10.0d in compartmentPixels
+        40.0d in compartmentPixels
     }
 
     @Unroll
@@ -385,7 +385,7 @@ class AppSpec extends Specification {
     def "addPercentileMeasurementsForCompartment should add measurements for percentiles #percentiles"() {
         given:
         def measurements = Mock(MeasurementList)
-        def pixels = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        def pixels = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] as double[]
         def channelName = "TestChannel"
         def compartment = "NUCLEUS"
 
