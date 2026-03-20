@@ -25,6 +25,7 @@ import qupath.lib.objects.PathObjects
 import qupath.lib.regions.ImagePlane
 import qupath.lib.regions.RegionRequest
 import qupath.lib.images.PathImage
+import qupath.lib.images.servers.ImageChannel
 import qupath.lib.images.servers.ImageServer
 import qupath.lib.images.servers.bioformats.BioFormatsServerBuilder
 import qupath.lib.measurements.MeasurementList
@@ -453,34 +454,55 @@ class AppSpec extends Specification {
     }
 
     @Unroll
-    def "addErosionMeasurements should process cell with #compartments compartments"() {
+    def "addErosionMeasurements should write area fraction measurements for #compartments compartments"() {
         given:
-        def server = createMockImageServer(100, 100)
-        def pathObject = createMockPathObject(10, 10, 50, 50)
-        pathObject.isCell() >> true
-        
+        def server = createMockImageServerWithChannels(100, 100, 1, ['DAPI'])
+        def pathObject = createRealCellPathObject(0, 0, 50, 50, 10, 10, 20, 20)
+        def cellData = createTestCellData(50, 50, 1)
+
         when:
-        app.addErosionMeasurements(server, pathObject, 1.0, [4], compartments as Set)
+        app.addErosionMeasurements(server, pathObject, 1.0, [4], compartments as Set, cellData)
 
         then:
-        noExceptionThrown()
+        pathObject.getMeasurementList().containsKey(expectedKey)
 
         where:
-        compartments << [['CELL'], ['NUCLEUS'], ['CELL', 'NUCLEUS']]
+        compartments           | expectedKey
+        ['CELL']               | 'Cell: Eroded_4px: Area_Fraction'
+        ['NUCLEUS']            | 'Nucleus: Eroded_4px: Area_Fraction'
+        ['CELL', 'NUCLEUS']    | 'Cell: Eroded_4px: Area_Fraction'
     }
 
     @Unroll
-    def "addErosionMeasurements should handle multiple erosion steps #steps"() {
+    def "addErosionMeasurements should write channel intensity measurements"() {
         given:
-        def server = createMockImageServer(100, 100)
-        def pathObject = createMockPathObject(10, 10, 50, 50)
-        pathObject.isCell() >> true
-        
+        def server = createMockImageServerWithChannels(100, 100, 1, ['DAPI'])
+        def pathObject = createRealCellPathObject(0, 0, 50, 50, 10, 10, 20, 20)
+        def cellData = createTestCellData(50, 50, 1)
+
         when:
-        app.addErosionMeasurements(server, pathObject, 1.0, steps)
+        app.addErosionMeasurements(server, pathObject, 1.0, [4], ['CELL'] as Set, cellData)
 
         then:
-        noExceptionThrown()
+        def ml = pathObject.getMeasurementList()
+        ml.containsKey('DAPI: Cell: Eroded_4px: Mean')
+        ml.containsKey('DAPI: Cell: Eroded_4px: Median')
+        !Double.isNaN(ml.get('DAPI: Cell: Eroded_4px: Mean') as double)
+    }
+
+    @Unroll
+    def "addErosionMeasurements should write measurements for all erosion steps #steps"() {
+        given:
+        def server = createMockImageServerWithChannels(100, 100, 1, ['DAPI'])
+        def pathObject = createRealCellPathObject(0, 0, 50, 50, 10, 10, 20, 20)
+        def cellData = createTestCellData(50, 50, 1)
+
+        when:
+        app.addErosionMeasurements(server, pathObject, 1.0, steps, ['CELL'] as Set, cellData)
+
+        then:
+        def ml = pathObject.getMeasurementList()
+        steps.every { step -> ml.containsKey("Cell: Eroded_${step}px: Area_Fraction") }
 
         where:
         steps << [[4], [4, 7], [4, 7, 11, 14]]
@@ -576,6 +598,48 @@ class AppSpec extends Specification {
         bounds.getBoundsY() == 0.0
         bounds.getBoundsWidth() == 500.0
         bounds.getBoundsHeight() == 400.0
+    }
+
+    private PathObject createRealCellPathObject(double x, double y, double w, double h,
+                                                double nx, double ny, double nw, double nh) {
+        def plane = ImagePlane.getDefaultPlane()
+        def cellROI = ROIs.createRectangleROI(x, y, w, h, plane)
+        def nucleusROI = ROIs.createRectangleROI(nx, ny, nw, nh, plane)
+        return PathObjects.createCellObject(cellROI, nucleusROI, null, null)
+    }
+
+    private Map createTestCellData(int width, int height, int nChannels) {
+        def cellMask = new ByteProcessor(width, height)
+        for (int y = 5; y < height - 5; y++) {
+            for (int x = 5; x < width - 5; x++) {
+                cellMask.set(x, y, 255)
+            }
+        }
+        def nuclearMask = new ByteProcessor(width, height)
+        for (int y = 10; y < height - 10; y++) {
+            for (int x = 10; x < width - 10; x++) {
+                nuclearMask.set(x, y, 255)
+            }
+        }
+        def allChannelPixels = (0..<nChannels).collect { c ->
+            def pixels = new float[width * height]
+            for (int i = 0; i < pixels.length; i++) pixels[i] = (c + 1) * 100.0f
+            pixels
+        }
+        return [masks: ['CELL': cellMask, 'NUCLEUS': nuclearMask], allChannelPixels: allChannelPixels]
+    }
+
+    private ImageServer createMockImageServerWithChannels(int width, int height, int nChannels,
+                                                          List<String> channelNames) {
+        def server = Mock(ImageServer)
+        server.getWidth() >> width
+        server.getHeight() >> height
+        server.nChannels() >> nChannels
+        channelNames.eachWithIndex { name, i ->
+            def ch = ImageChannel.getInstance(name, null)
+            server.getChannel(i) >> ch
+        }
+        return server
     }
 
     // Helper method for erosion tests

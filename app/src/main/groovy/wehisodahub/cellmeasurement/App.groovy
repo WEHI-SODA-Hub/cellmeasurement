@@ -549,7 +549,7 @@ class App implements Runnable {
                     
                     // Add area fraction (only once per erosion step, not per channel)
                     def areaFraction = erodedArea / (double)baseArea
-                    measurements.putMeasurement(
+                    measurements.put(
                         "${compartmentName}: Eroded_${steps}px: Area_Fraction",
                         areaFraction
                     )
@@ -563,11 +563,11 @@ class App implements Runnable {
                             if (channelErodedPixels.length > 0) {
                                 def stats = new DescriptiveStatistics(channelErodedPixels)
                                 
-                                measurements.putMeasurement(
+                                measurements.put(
                                     "${channelName}: ${compartmentName}: Eroded_${steps}px: Mean",
                                     stats.getMean()
                                 )
-                                measurements.putMeasurement(
+                                measurements.put(
                                     "${channelName}: ${compartmentName}: Eroded_${steps}px: Median",
                                     stats.getPercentile(50)
                                 )
