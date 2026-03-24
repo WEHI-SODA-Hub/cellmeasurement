@@ -10,6 +10,7 @@ import java.awt.geom.Point2D
 import java.nio.file.Paths
 import java.awt.Rectangle
 import java.awt.image.BufferedImage
+import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 
@@ -121,6 +122,16 @@ class App implements Runnable {
             description = 'Number of threads to use for parallel processing (default: 1)',
             required = false)
     int threads = 1
+
+    @Option(names = ['--tile-size'],
+            description = 'Tile size in pixels for batch image I/O during measurement (default: 2048)',
+            required = false)
+    int tileSize = 2048
+
+    @Option(names = ['--tile-overlap'],
+            description = 'Tile overlap in pixels to reduce edge overflows (default: 200)',
+            required = false)
+    int tileOverlap = 200
 
     /**
     * Extract ROIs from a binary mask image.
@@ -306,6 +317,172 @@ class App implements Runnable {
         }
 
         return [masks: masks, allChannelPixels: allChannelPixels]
+    }
+
+    /**
+     * Group path objects by the tile their centroid falls in.
+     * Tiles are defined in full image coordinates; tileSize is the nominal tile edge length.
+     * @return Map from [tileCol, tileRow] to list of path objects
+     */
+    static Map<List<Integer>, List<PathObject>> groupCellsByTile(
+            List<PathObject> pathObjects, int tileSize, int imageWidth, int imageHeight) {
+        def tileMap = [:].withDefault { [] }
+        pathObjects.each { pathObject ->
+            def roi = pathObject.getROI()
+            if (roi == null) return
+            int tileCol = (int)(roi.getCentroidX() / tileSize)
+            int tileRow = (int)(roi.getCentroidY() / tileSize)
+            tileMap[[tileCol, tileRow]] << pathObject
+        }
+        return tileMap
+    }
+
+    /**
+     * Extract a rectangular sub-region from a flat row-major pixel array.
+     * @param tilePixels Full tile pixel array (row-major, tileWidth × tileHeight elements)
+     * @param tileWidth  Width of the full tile in pixels
+     * @param offX       X offset of sub-region within the tile (pixels)
+     * @param offY       Y offset of sub-region within the tile (pixels)
+     * @param subW       Width of sub-region (pixels)
+     * @param subH       Height of sub-region (pixels)
+     * @return New float[] with sub-region pixels in row-major order
+     */
+    static float[] extractSubRegionPixels(float[] tilePixels, int tileWidth,
+                                           int offX, int offY, int subW, int subH) {
+        float[] result = new float[subW * subH]
+        for (int row = 0; row < subH; row++) {
+            System.arraycopy(tilePixels, (offY + row) * tileWidth + offX,
+                             result,     row * subW,
+                             subW)
+        }
+        return result
+    }
+
+    /**
+     * Create a binary mask for an ROI without requiring a PathImage, using explicit
+     * origin coordinates. xOrigin and yOrigin are in the same coordinate space as
+     * the ROI (full image coordinates); the resulting mask is in downsampled pixels.
+     */
+    def createROIMaskFromOrigin(roi, int width, int height,
+                                 double xOrigin, double yOrigin, double downsampleFactor) {
+        def mask = new ByteProcessor(width, height)
+        def roiIJ = IJTools.convertToIJRoi(roi, xOrigin, yOrigin, downsampleFactor)
+        mask.setColor(255)
+        mask.fill(roiIJ)
+        return mask
+    }
+
+    /**
+     * Create compartment masks without requiring a PathImage.
+     * xOrigin/yOrigin are the full-image coordinates of the cell bounding box top-left corner.
+     */
+    def createCompartmentMasksFromOrigin(cellROI, nucleusROI, int width, int height,
+                                          double xOrigin, double yOrigin, double downsampleFactor,
+                                          Set<String> compartments) {
+        def masks = [:]
+
+        if (compartments.contains('CELL')) {
+            masks['CELL'] = createROIMaskFromOrigin(cellROI, width, height, xOrigin, yOrigin, downsampleFactor)
+        }
+
+        def nucleusMask = null
+        if (nucleusROI != null && (compartments.contains('NUCLEUS') || compartments.contains('CYTOPLASM'))) {
+            nucleusMask = createROIMaskFromOrigin(nucleusROI, width, height, xOrigin, yOrigin, downsampleFactor)
+            if (compartments.contains('NUCLEUS')) {
+                masks['NUCLEUS'] = nucleusMask
+            }
+        }
+
+        if (compartments.contains('CYTOPLASM') && masks.containsKey('CELL') && nucleusMask != null) {
+            masks['CYTOPLASM'] = subtractMasks(masks['CELL'], nucleusMask)
+        }
+
+        if (compartments.contains('MEMBRANE') && masks.containsKey('CELL')) {
+            masks['MEMBRANE'] = createMembraneMask(masks['CELL'])
+        }
+
+        return masks
+    }
+
+    /**
+     * Load cell data from pre-fetched tile pixel arrays, avoiding per-cell image I/O.
+     * Returns null if the cell's bounding box does not lie fully within the tile.
+     * @param pathObject        Cell to load data for (must pass isCell())
+     * @param downsampleFactor  Resolution factor used when reading the tile
+     * @param compartments      Set of compartment masks to create
+     * @param tileChannelPixels Pre-extracted pixel arrays per channel (tile pixel space, row-major)
+     * @param tilePxX           Tile x origin in downsampled pixel coordinates
+     * @param tilePxY           Tile y origin in downsampled pixel coordinates
+     * @param tilePxW           Tile width in downsampled pixels
+     * @param tilePxH           Tile height in downsampled pixels
+     * @return Map with 'masks' and 'allChannelPixels', or null
+     */
+    def loadCellDataFromTile(PathObject pathObject, double downsampleFactor,
+                              Set<String> compartments, List<float[]> tileChannelPixels,
+                              int tilePxX, int tilePxY, int tilePxW, int tilePxH) {
+        if (!pathObject.isCell()) return null
+
+        def cellROI = pathObject.getROI()
+        def nucleusROI = pathObject.getNucleusROI()
+        if (cellROI == null) return null
+
+        // Cell bounding box in downsampled pixel space
+        int cPxX = (int)(cellROI.getBoundsX() / downsampleFactor)
+        int cPxY = (int)(cellROI.getBoundsY() / downsampleFactor)
+        int cPxW = (int)(cellROI.getBoundsWidth()  / downsampleFactor) + 1
+        int cPxH = (int)(cellROI.getBoundsHeight() / downsampleFactor) + 1
+
+        // Offset within the tile
+        int offX = cPxX - tilePxX
+        int offY = cPxY - tilePxY
+
+        // Cell must lie fully within the tile
+        if (offX < 0 || offY < 0 || offX + cPxW > tilePxW || offY + cPxH > tilePxH) return null
+
+        // Sub-region pixels for each channel — no server read
+        def allChannelPixels = tileChannelPixels.collect { tilePixels ->
+            extractSubRegionPixels(tilePixels, tilePxW, offX, offY, cPxW, cPxH)
+        }
+
+        // xOrigin = -cellBoundsX/ds so that IJTools maps cell top-left → (0,0)
+        double xOrigin = -cellROI.getBoundsX() / downsampleFactor
+        double yOrigin = -cellROI.getBoundsY() / downsampleFactor
+        def masks = createCompartmentMasksFromOrigin(
+            cellROI, nucleusROI, cPxW, cPxH, xOrigin, yOrigin, downsampleFactor, compartments
+        )
+
+        return [masks: masks, allChannelPixels: allChannelPixels]
+    }
+
+    /**
+     * Add standard intensity measurements (mean, median, min, max, std dev) for all
+     * compartments from pre-loaded cell data. Replaces ObjectMeasurements.addIntensityMeasurements,
+     * avoiding a redundant per-cell image read.
+     * Measurement name format: "{Compartment}: {channel}: {stat}" — e.g. "Cell: DAPI: Mean"
+     */
+    def addStandardIntensityMeasurements(server, PathObject pathObject, Map cellData) {
+        if (cellData == null) return
+        def ml = pathObject.getMeasurementList()
+        int nChannels = server.nChannels()
+        def compartmentLabels = [CELL: 'Cell', NUCLEUS: 'Nucleus', CYTOPLASM: 'Cytoplasm', MEMBRANE: 'Membrane']
+
+        for (int c = 0; c < nChannels; c++) {
+            def channelName = server.getChannel(c).getName()
+            def pixelValues = cellData.allChannelPixels[c]
+
+            cellData.masks.each { compartment, mask ->
+                def label = compartmentLabels.get(compartment, compartment)
+                def pixels = getCompartmentPixels(pixelValues, mask)
+                if (pixels.length == 0) return
+
+                def stats = new DescriptiveStatistics(pixels)
+                ml.put("${label}: ${channelName}: Mean",     stats.getMean())
+                ml.put("${label}: ${channelName}: Median",   stats.getPercentile(50))
+                ml.put("${label}: ${channelName}: Min",      stats.getMin())
+                ml.put("${label}: ${channelName}: Max",      stats.getMax())
+                ml.put("${label}: ${channelName}: Std.Dev.", stats.getStandardDeviation())
+            }
+        }
     }
 
     /**
@@ -620,6 +797,13 @@ class App implements Runnable {
 
     @Override
     void run() {
+        if (tileSize <= 0) {
+            throw new IllegalArgumentException('tileSize must be > 0')
+        }
+        if (tileOverlap < 0) {
+            throw new IllegalArgumentException('tileOverlap must be >= 0')
+        }
+
         // Load whole cell mask using Bio-Formats via QuPath, more robust than ImageJ for very large images
         def wholeCellImp = loadMaskAsImagePlus(wholeCellMaskFilePath)
         println 'Loaded whole cell mask width: ' + wholeCellImp.getWidth()
@@ -674,23 +858,6 @@ class App implements Runnable {
                 .build()
             println 'Set pixel calibration: ' + pixelCalibration
 
-            // Define measurements
-            def measurements = [
-                ObjectMeasurements.Measurements.MEAN,
-                ObjectMeasurements.Measurements.MEDIAN,
-                ObjectMeasurements.Measurements.MIN,
-                ObjectMeasurements.Measurements.MAX,
-                ObjectMeasurements.Measurements.STD_DEV
-            ]
-
-            // Define compartments
-            def compartments = [
-                ObjectMeasurements.Compartments.CELL,
-                ObjectMeasurements.Compartments.CYTOPLASM,
-                ObjectMeasurements.Compartments.MEMBRANE,
-                ObjectMeasurements.Compartments.NUCLEUS
-            ]
-
             // Pre-parse optional measurement parameters before entering the parallel block
             def percentileList = percentiles ? percentiles.split(',').collect { it as Double } : null
             def erosionList = null
@@ -707,63 +874,148 @@ class App implements Runnable {
             if (erosionList)
                 println 'Will add erosion measurements at steps: ' + erosionList
 
-            println 'Adding cell measurements...'
-            GParsPool.withPool(threads) {
-                pathObjects.eachParallel { pathObject ->
-                    // Shape measurements (geometry only, no image I/O)
-                    ObjectMeasurements.addShapeMeasurements(
-                        pathObject,
-                        pixelCalibration,
-                        ObjectMeasurements.ShapeFeatures.AREA,
-                        ObjectMeasurements.ShapeFeatures.CIRCULARITY,
-                        ObjectMeasurements.ShapeFeatures.LENGTH,
-                        ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
-                        ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
-                        ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
-                        ObjectMeasurements.ShapeFeatures.SOLIDITY
-                    )
+            def allCompartments      = ['CELL', 'NUCLEUS', 'CYTOPLASM', 'MEMBRANE'] as Set
+            def erosionCompartments  = ['CELL', 'NUCLEUS'] as Set
+            def percentileCompartments = ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL'] as Set
+            def ds = downsampleFactor as double
 
-                    // Standard intensity measurements (mean, median, min, max, stddev)
-                    ObjectMeasurements.addIntensityMeasurements(
-                        server,
-                        pathObject,
-                        downsampleFactor,
-                        measurements,
-                        compartments
-                    )
+            // Group cells by tile (centroid determines tile assignment)
+            def tileGroups = groupCellsByTile(pathObjects, tileSize, imageWidth, imageHeight)
+            println "Adding cell measurements in ${tileGroups.size()} tiles (tile size: ${tileSize}px, overlap: ${tileOverlap}px)..."
+            // Overlap ensures cells near tile edges have their full bounding box within the read region
 
-                    // Load image data once, shared between percentile and erosion measurements
-                    if (percentileList || erosionList) {
-                        def cellData = loadCellData(
-                            server,
-                            pathObject,
-                            (double) downsampleFactor,
-                            ['CELL', 'NUCLEUS', 'CYTOPLASM', 'MEMBRANE'] as Set
-                        )
-                        if (cellData != null) {
+            int processedCells = 0
+            int totalCells = pathObjects.size()
+            def tileReadFallbackTiles = new AtomicInteger(0)
+            def tileFallbackCells = new AtomicInteger(0)
+            def skippedCells = new AtomicInteger(0)
+
+            tileGroups.each { tileKey, tileCells ->
+                int tileCol = tileKey[0]
+                int tileRow = tileKey[1]
+
+                // Tile region in full image coordinates, padded by tileOverlap on all sides
+                int txFull   = Math.max(0,           tileCol * tileSize - tileOverlap)
+                int tyFull   = Math.max(0,           tileRow * tileSize - tileOverlap)
+                int txEnd    = Math.min(imageWidth,  (tileCol + 1) * tileSize + tileOverlap)
+                int tyEnd    = Math.min(imageHeight, (tileRow + 1) * tileSize + tileOverlap)
+                int twFull   = txEnd - txFull
+                int thFull   = tyEnd - tyFull
+
+                // Read this tile once from the server
+                def tileRequest = RegionRequest.createInstance(
+                    server.getPath(), ds, txFull, tyFull, twFull, thFull
+                )
+                def tileImg = server.readRegion(tileRequest)
+                if (tileImg == null) {
+                    println "Warning: tile read returned null for tile (${tileCol}, ${tileRow}); falling back to per-cell reads for ${tileCells.size()} cells"
+                    tileReadFallbackTiles.incrementAndGet()
+                    tileFallbackCells.addAndGet(tileCells.size())
+
+                    GParsPool.withPool(threads) {
+                        tileCells.eachParallel { pathObject ->
+                            ObjectMeasurements.addShapeMeasurements(
+                                pathObject,
+                                pixelCalibration,
+                                ObjectMeasurements.ShapeFeatures.AREA,
+                                ObjectMeasurements.ShapeFeatures.CIRCULARITY,
+                                ObjectMeasurements.ShapeFeatures.LENGTH,
+                                ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
+                                ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
+                                ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
+                                ObjectMeasurements.ShapeFeatures.SOLIDITY
+                            )
+
+                            def cellData = loadCellData(server, pathObject, ds, allCompartments)
+                            if (cellData == null) {
+                                skippedCells.incrementAndGet()
+                                return
+                            }
+
+                            addStandardIntensityMeasurements(server, pathObject, cellData)
                             if (percentileList) {
                                 addPercentileMeasurements(
-                                    server,
-                                    pathObject,
-                                    (double) downsampleFactor,
-                                    percentileList,
-                                    ['NUCLEUS', 'CYTOPLASM', 'MEMBRANE', 'CELL'] as Set,
-                                    cellData
+                                    server, pathObject, ds, percentileList,
+                                    percentileCompartments, cellData
                                 )
                             }
                             if (erosionList) {
                                 addErosionMeasurements(
-                                    server,
-                                    pathObject,
-                                    (double) downsampleFactor,
-                                    erosionList,
-                                    ['CELL', 'NUCLEUS'] as Set,
-                                    cellData
+                                    server, pathObject, ds, erosionList,
+                                    erosionCompartments, cellData
                                 )
                             }
                         }
                     }
+
+                    processedCells += tileCells.size()
+                    println "Progress: ${processedCells}/${totalCells} cells (${(processedCells * 100.0 / totalCells).toInteger()}%)"
+                    return
                 }
+
+                int tilePxW = tileImg.getWidth()
+                int tilePxH = tileImg.getHeight()
+                int tilePxX = (int)(txFull / ds)
+                int tilePxY = (int)(tyFull / ds)
+
+                // Extract all channel pixel arrays from the tile once, shared across all cells
+                def nChannels = server.nChannels()
+                def tileChannelPixels = (0..<nChannels).collect { c ->
+                    extractChannelPixels(tileImg, c, tilePxW, tilePxH)
+                }
+
+                GParsPool.withPool(threads) {
+                    tileCells.eachParallel { pathObject ->
+                        // Shape measurements (geometry only, no image I/O)
+                        ObjectMeasurements.addShapeMeasurements(
+                            pathObject,
+                            pixelCalibration,
+                            ObjectMeasurements.ShapeFeatures.AREA,
+                            ObjectMeasurements.ShapeFeatures.CIRCULARITY,
+                            ObjectMeasurements.ShapeFeatures.LENGTH,
+                            ObjectMeasurements.ShapeFeatures.MAX_DIAMETER,
+                            ObjectMeasurements.ShapeFeatures.MIN_DIAMETER,
+                            ObjectMeasurements.ShapeFeatures.NUCLEUS_CELL_RATIO,
+                            ObjectMeasurements.ShapeFeatures.SOLIDITY
+                        )
+
+                        // Load all cell data from the shared tile pixels — no per-cell I/O
+                        def cellData = loadCellDataFromTile(
+                            pathObject, ds, allCompartments,
+                            tileChannelPixels, tilePxX, tilePxY, tilePxW, tilePxH
+                        )
+                        if (cellData == null) {
+                            tileFallbackCells.incrementAndGet()
+                            cellData = loadCellData(server, pathObject, ds, allCompartments)
+                        }
+
+                        if (cellData == null) {
+                            skippedCells.incrementAndGet()
+                            return
+                        }
+
+                        addStandardIntensityMeasurements(server, pathObject, cellData)
+                        if (percentileList) {
+                            addPercentileMeasurements(
+                                server, pathObject, ds, percentileList,
+                                percentileCompartments, cellData
+                            )
+                        }
+                        if (erosionList) {
+                            addErosionMeasurements(
+                                server, pathObject, ds, erosionList,
+                                erosionCompartments, cellData
+                            )
+                        }
+                    }
+                }
+
+                processedCells += tileCells.size()
+                println "Progress: ${processedCells}/${totalCells} cells (${(processedCells * 100.0 / totalCells).toInteger()}%)"
+            }
+
+            if (tileReadFallbackTiles.get() > 0 || tileFallbackCells.get() > 0 || skippedCells.get() > 0) {
+                println "Tile fallback summary: null-tile-fallback-tiles=${tileReadFallbackTiles.get()}, per-cell-fallbacks=${tileFallbackCells.get()}, skipped-cells=${skippedCells.get()}"
             }
         }
 
@@ -791,4 +1043,3 @@ class App implements Runnable {
     }
 
 }
-

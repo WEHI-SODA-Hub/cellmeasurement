@@ -76,6 +76,8 @@ class AppSpec extends Specification {
         freshApp.distThreshold == 10.0
         freshApp.estimateCellBoundaryDist == 3.0
         freshApp.threads == 1
+        freshApp.tileSize == 2048
+        freshApp.tileOverlap == 200
     }
 
     def "extractROIs should return empty list for image with no objects"() {
@@ -229,6 +231,79 @@ class AppSpec extends Specification {
         then:
         result.size() == 2
         result.containsAll([cell1, cell2])
+    }
+
+    def "groupCellsByTile should group path objects by centroid tile"() {
+        given:
+        def cellA = createMockCellPathObjectWithCentroid(100, 100)
+        def cellB = createMockCellPathObjectWithCentroid(1999, 1999)
+        def cellC = createMockCellPathObjectWithCentroid(2100, 100)
+        def tileSize = 2048
+
+        when:
+        def grouped = App.groupCellsByTile([cellA, cellB, cellC], tileSize, 5000, 5000)
+
+        then:
+        grouped.size() == 2
+        grouped[[0, 0]].containsAll([cellA, cellB])
+        grouped[[1, 0]].contains(cellC)
+    }
+
+    def "extractSubRegionPixels should copy rectangular subregion in row-major order"() {
+        given:
+        // 4x4 tile:
+        //  1  2  3  4
+        //  5  6  7  8
+        //  9 10 11 12
+        // 13 14 15 16
+        def tilePixels = [
+            1f, 2f, 3f, 4f,
+            5f, 6f, 7f, 8f,
+            9f, 10f, 11f, 12f,
+            13f, 14f, 15f, 16f
+        ] as float[]
+
+        when:
+        // 2x2 starting at (1,1) => [6,7,10,11]
+        def sub = App.extractSubRegionPixels(tilePixels, 4, 1, 1, 2, 2)
+
+        then:
+        sub as List == [6f, 7f, 10f, 11f]
+    }
+
+    def "loadCellDataFromTile should return masks and cropped pixels when cell fits tile"() {
+        given:
+        def pathObject = createRealCellPathObject(2, 3, 2, 2, 2, 3, 1, 1)
+        def tilePixels = new float[10 * 10]
+        for (int i = 0; i < tilePixels.length; i++) tilePixels[i] = i as float
+
+        when:
+        def data = app.loadCellDataFromTile(
+            pathObject, 1.0, ['CELL', 'NUCLEUS'] as Set,
+            [tilePixels], 0, 0, 10, 10
+        )
+
+        then:
+        data != null
+        data.masks.keySet().containsAll(['CELL', 'NUCLEUS'])
+        data.allChannelPixels.size() == 1
+        // width/height include +1 in App.getCellBoundingBox logic: (2x2 ROI -> 3x3 pixels)
+        data.allChannelPixels[0].length == 9
+    }
+
+    def "loadCellDataFromTile should return null when cell bounds fall outside tile"() {
+        given:
+        def pathObject = createRealCellPathObject(2, 3, 2, 2, 2, 3, 1, 1)
+        def tilePixels = new float[10 * 10]
+
+        when:
+        def data = app.loadCellDataFromTile(
+            pathObject, 1.0, ['CELL'] as Set,
+            [tilePixels], 5, 5, 10, 10
+        )
+
+        then:
+        data == null
     }
 
     def "makeCellObjects should handle empty ROI lists"() {
@@ -710,6 +785,14 @@ class AppSpec extends Specification {
         roi.getCentroidY() >> centroidY
         roi.getImagePlane() >> ImagePlane.getDefaultPlane()
         return roi
+    }
+
+    private PathObject createMockCellPathObjectWithCentroid(double centroidX, double centroidY) {
+        // Use a real PathCellObject to avoid mocking limitations on PathObject
+        def plane = ImagePlane.getDefaultPlane()
+        def cellROI = ROIs.createRectangleROI(centroidX - 1, centroidY - 1, 2, 2, plane)
+        def nucleusROI = ROIs.createRectangleROI(centroidX - 0.5, centroidY - 0.5, 1, 1, plane)
+        return PathObjects.createCellObject(cellROI, nucleusROI, null, null)
     }
 
     private PathObject createMockPathObject(double x, double y, double width, double height) {
