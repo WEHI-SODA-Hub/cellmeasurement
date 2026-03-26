@@ -174,7 +174,23 @@ class App implements Runnable {
                 return PathObjects.createCellObject(cell, nucleus)
             }
         }.findAll { it != null }
-        return CellTools.constrainCellOverlaps(pathObjects)
+        def constrained = CellTools.constrainCellOverlaps(pathObjects)
+
+        // constrainCellOverlaps uses Voronoi clipping which can produce degenerate geometries
+        // (e.g. zero-area polygons clipped to a line) that IJTools cannot convert to ImageJ ROIs.
+        def valid = constrained.findAll { cell ->
+            def roi = cell.getROI()
+            if (roi == null) return false
+            def geom = roi.getGeometry()
+            if (geom == null || geom.isEmpty()) return false
+            def type = geom.getGeometryType()
+            return (type == 'Polygon' || type == 'MultiPolygon') && geom.getArea() > 0
+        }
+        int filtered = constrained.size() - valid.size()
+        if (filtered > 0) {
+            println "Filtered ${filtered} degenerate cell(s) produced by constrainCellOverlaps (zero area or non-polygon geometry)"
+        }
+        return valid
     }
 
     /**
@@ -366,9 +382,13 @@ class App implements Runnable {
     def createROIMaskFromOrigin(roi, int width, int height,
                                  double xOrigin, double yOrigin, double downsampleFactor) {
         def mask = new ByteProcessor(width, height)
-        def roiIJ = IJTools.convertToIJRoi(roi, xOrigin, yOrigin, downsampleFactor)
-        mask.setColor(255)
-        mask.fill(roiIJ)
+        try {
+            def roiIJ = IJTools.convertToIJRoi(roi, xOrigin, yOrigin, downsampleFactor)
+            mask.setColor(255)
+            mask.fill(roiIJ)
+        } catch (UnsupportedOperationException e) {
+            println "Warning: could not convert ROI to ImageJ ROI, returning empty mask: ${e.getMessage()}"
+        }
         return mask
     }
 
@@ -591,12 +611,13 @@ class App implements Runnable {
      */
     def createROIMask(roi, int width, int height, pathImage) {
         def mask = new ByteProcessor(width, height)
-
-        def roiIJ = IJTools.convertToIJRoi(roi, pathImage)
-
-        mask.setColor(255)
-        mask.fill(roiIJ)
-
+        try {
+            def roiIJ = IJTools.convertToIJRoi(roi, pathImage)
+            mask.setColor(255)
+            mask.fill(roiIJ)
+        } catch (UnsupportedOperationException e) {
+            println "Warning: could not convert ROI to ImageJ ROI, returning empty mask: ${e.getMessage()}"
+        }
         return mask
     }
 
