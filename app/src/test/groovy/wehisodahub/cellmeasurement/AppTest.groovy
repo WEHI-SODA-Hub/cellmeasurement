@@ -314,6 +314,26 @@ class AppSpec extends Specification {
         result.isEmpty()
     }
 
+    def "makeCellObjects should not filter valid non-overlapping cells"() {
+        given:
+        def plane = ImagePlane.getDefaultPlane()
+        // Two well-separated cells — constrainCellOverlaps won't clip either, so both should survive the filter
+        def cell1 = ROIs.createRectangleROI(0, 0, 20, 20, plane)
+        def nuc1  = ROIs.createRectangleROI(5, 5, 10, 10, plane)
+        def cell2 = ROIs.createRectangleROI(200, 200, 20, 20, plane)
+        def nuc2  = ROIs.createRectangleROI(205, 205, 10, 10, plane)
+
+        when:
+        def result = App.makeCellObjects([cell1, cell2], [nuc1, nuc2], 20.0, 3.0)
+
+        then:
+        result.size() == 2
+        result.every { cell ->
+            def geom = cell.getROI().getGeometry()
+            geom.getArea() > 0 && (geom.getGeometryType() == 'Polygon' || geom.getGeometryType() == 'MultiPolygon')
+        }
+    }
+
     def "matchROIs should return pairs for each nuclear ROI"() {
         given:
         def nuclearROI = createMockROI(50, 50)
@@ -420,6 +440,44 @@ class AppSpec extends Specification {
         mask instanceof ByteProcessor
         mask.getWidth() == 50
         mask.getHeight() == 30
+    }
+
+    def "createROIMask should return empty mask for unsupported ROI geometry"() {
+        given:
+        // PointsROI triggers UnsupportedOperationException in the pathImage overload of
+        // IJTools.convertToIJRoi. The fix should catch this and return an empty mask.
+        def roi = ROIs.createPointsROI(50.0, 50.0, ImagePlane.getDefaultPlane())
+        def tiffFilePath = getClass().getResource('/synthetic_test.ome.tif').toURI()
+        def pathImage = getPathImage(tiffFilePath)
+
+        when:
+        def mask = app.createROIMask(roi, 50, 30, pathImage)
+
+        then:
+        noExceptionThrown()
+        mask instanceof ByteProcessor
+        mask.getWidth() == 50
+        mask.getHeight() == 30
+        // mask should be all zeros (no pixels filled) because the ROI could not be converted
+        countNonZeroPixels(mask) == 0
+    }
+
+    def "createROIMaskFromOrigin should return a valid mask for any ROI geometry type"() {
+        given:
+        // A LineROI has a non-polygon geometry — verify the method is resilient and always
+        // returns a valid ByteProcessor. The UnsupportedOperationException catch is a safety
+        // net for degenerate geometries produced by constrainCellOverlaps in production;
+        // those geometries are difficult to reproduce without real Voronoi-clipped cells.
+        def roi = ROIs.createLineROI(0.0, 0.0, 10.0, 0.0, ImagePlane.getDefaultPlane())
+
+        when:
+        def mask = app.createROIMaskFromOrigin(roi, 100, 100, 0.0, 0.0, 1.0)
+
+        then:
+        noExceptionThrown()
+        mask instanceof ByteProcessor
+        mask.getWidth() == 100
+        mask.getHeight() == 100
     }
 
     def "getCompartmentPixels should extract only masked pixels"() {
