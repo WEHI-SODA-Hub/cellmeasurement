@@ -176,20 +176,39 @@ class App implements Runnable {
         }.findAll { it != null }
         def constrained = CellTools.constrainCellOverlaps(pathObjects)
 
-        // constrainCellOverlaps uses Voronoi clipping which can produce degenerate geometries
-        // (e.g. zero-area polygons clipped to a line) that IJTools cannot convert to ImageJ ROIs.
-        def valid = constrained.findAll { cell ->
+        // constrainCellOverlaps uses Voronoi clipping which can produce GeometryCollections
+        // with nested MultiPolygons. These cause infinite recursion in QuPath's GeoJSON writer
+        // (ROITypeAdapters.writeCoordinates). Applying buffer(0) re-builds each geometry from
+        // scratch via JTS's sweep-line algorithm, guaranteeing a flat Polygon or MultiPolygon
+        // with no nested structures. Cells that are still degenerate (zero area) after fixing
+        // are dropped.
+        int fixed = 0
+        int dropped = 0
+        def valid = constrained.collect { cell ->
             def roi = cell.getROI()
-            if (roi == null) return false
+            if (roi == null) { dropped++; return null }
             def geom = roi.getGeometry()
-            if (geom == null || geom.isEmpty()) return false
+            if (geom == null || geom.isEmpty()) { dropped++; return null }
+
             def type = geom.getGeometryType()
-            return (type == 'Polygon' || type == 'MultiPolygon') && geom.getArea() > 0
-        }
-        int filtered = constrained.size() - valid.size()
-        if (filtered > 0) {
-            println "Filtered ${filtered} degenerate cell(s) produced by constrainCellOverlaps (zero area or non-polygon geometry)"
-        }
+            if (type != 'Polygon' && type != 'MultiPolygon') {
+                // Flatten complex/nested geometry via buffer(0)
+                def fixedGeom = geom.buffer(0)
+                if (fixedGeom.isEmpty() || fixedGeom.getArea() <= 0) { dropped++; return null }
+                def fixedRoi = GeometryTools.geometryToROI(fixedGeom, roi.getImagePlane())
+                def nucleusRoi = cell.getNucleusROI()
+                fixed++
+                return PathObjects.createCellObject(fixedRoi, nucleusRoi)
+            }
+
+            if (geom.getArea() <= 0) { dropped++; return null }
+            return cell
+        }.findAll { it != null }
+
+        if (fixed > 0)
+            println "Fixed ${fixed} cell(s) with nested/complex geometry using buffer(0)"
+        if (dropped > 0)
+            println "Dropped ${dropped} degenerate cell(s) produced by constrainCellOverlaps (zero area or non-polygon geometry)"
         return valid
     }
 
