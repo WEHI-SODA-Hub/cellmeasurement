@@ -70,3 +70,7 @@ application {
     // Define the main class for the application.
     mainClass = 'wehisodahub.cellmeasurement.App'
 }
+
+run {
+    jvmArgs = ['-Xss64m']
+}
