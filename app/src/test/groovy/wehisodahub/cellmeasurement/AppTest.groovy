@@ -23,6 +23,11 @@ import qupath.lib.roi.ROIs
 import qupath.lib.objects.PathObject
 import qupath.lib.objects.PathObjects
 import qupath.lib.regions.ImagePlane
+
+import org.locationtech.jts.geom.Coordinate
+import org.locationtech.jts.geom.GeometryFactory
+import org.locationtech.jts.geom.Polygon
+import org.locationtech.jts.geom.MultiPolygon
 import qupath.lib.regions.RegionRequest
 import qupath.lib.images.PathImage
 import qupath.lib.images.servers.ImageChannel
@@ -891,5 +896,96 @@ class AppSpec extends Specification {
         )
 
         return IJTools.convertToImagePlus(server, request);
+    }
+
+    // -----------------------------------------------------------------------
+    // isWritableGeometry
+    // -----------------------------------------------------------------------
+
+    static GeometryFactory GF = new GeometryFactory()
+
+    static Polygon makeSquare(double x, double y, double size) {
+        def coords = [
+            new Coordinate(x,        y),
+            new Coordinate(x + size, y),
+            new Coordinate(x + size, y + size),
+            new Coordinate(x,        y + size),
+            new Coordinate(x,        y),   // close ring
+        ] as Coordinate[]
+        return GF.createPolygon(coords)
+    }
+
+    def "isWritableGeometry should accept a simple Polygon"() {
+        given:
+        def geom = makeSquare(0, 0, 10)
+
+        expect:
+        App.isWritableGeometry(geom)
+    }
+
+    def "isWritableGeometry should accept a MultiPolygon whose children are all flat Polygons"() {
+        given:
+        def p1 = makeSquare(0,  0, 10)
+        def p2 = makeSquare(20, 0, 10)
+        def geom = GF.createMultiPolygon([p1, p2] as Polygon[])
+
+        expect:
+        App.isWritableGeometry(geom)
+    }
+
+    def "isWritableGeometry should reject a MultiPolygon that contains a nested MultiPolygon"() {
+        given:
+        // JTS allows constructing a GeometryCollection and casting — this replicates
+        // what QuPath's GeometryTools does when coercing a mixed GeometryCollection
+        def p1 = makeSquare(0,  0, 10)
+        def p2 = makeSquare(20, 0, 10)
+        def nested = GF.createMultiPolygon([p1, p2] as Polygon[])
+        // Wrap nested MultiPolygon inside another GeometryCollection passed as MultiPolygon
+        def geom = GF.createGeometryCollection([makeSquare(40, 0, 10), nested] as org.locationtech.jts.geom.Geometry[])
+
+        expect:
+        !App.isWritableGeometry(geom)
+    }
+
+    def "isWritableGeometry should reject a bare GeometryCollection"() {
+        given:
+        def geom = GF.createGeometryCollection(
+            [makeSquare(0, 0, 10), makeSquare(20, 0, 10)] as org.locationtech.jts.geom.Geometry[]
+        )
+
+        expect:
+        !App.isWritableGeometry(geom)
+    }
+
+    def "isWritableGeometry should reject a LineString"() {
+        given:
+        def geom = GF.createLineString([new Coordinate(0,0), new Coordinate(10,10)] as Coordinate[])
+
+        expect:
+        !App.isWritableGeometry(geom)
+    }
+
+    def "isWritableGeometry should reject a Point"() {
+        given:
+        def geom = GF.createPoint(new Coordinate(5, 5))
+
+        expect:
+        !App.isWritableGeometry(geom)
+    }
+
+    def "buffer(0) on a nested MultiPolygon produces a writable geometry"() {
+        given:
+        def p1 = makeSquare(0,  0, 10)
+        def p2 = makeSquare(20, 0, 10)
+        def nested = GF.createMultiPolygon([p1, p2] as Polygon[])
+        def geom = GF.createGeometryCollection([makeSquare(40, 0, 10), nested] as org.locationtech.jts.geom.Geometry[])
+        assert !App.isWritableGeometry(geom)
+
+        when:
+        def fixed = geom.buffer(0)
+
+        then:
+        App.isWritableGeometry(fixed)
+        fixed.getArea() > 0
     }
 }

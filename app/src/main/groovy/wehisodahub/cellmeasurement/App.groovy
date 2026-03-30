@@ -178,10 +178,12 @@ class App implements Runnable {
 
         // constrainCellOverlaps uses Voronoi clipping which can produce GeometryCollections
         // with nested MultiPolygons. These cause infinite recursion in QuPath's GeoJSON writer
-        // (ROITypeAdapters.writeCoordinates). Applying buffer(0) re-builds each geometry from
-        // scratch via JTS's sweep-line algorithm, guaranteeing a flat Polygon or MultiPolygon
-        // with no nested structures. Cells that are still degenerate (zero area) after fixing
-        // are dropped.
+        // (ROITypeAdapters.writeCoordinates), which dispatches on top-level type but then
+        // recurses back through the generic dispatcher for each child — so a MultiPolygon
+        // whose children are themselves MultiPolygons (not flat Polygons) loops forever.
+        // Applying buffer(0) re-builds each geometry from scratch via JTS's sweep-line
+        // algorithm, guaranteeing a flat, valid Polygon or MultiPolygon(Polygon...) structure.
+        // Cells that are still degenerate (zero area) after fixing are dropped.
         int fixed = 0
         int dropped = 0
         def valid = constrained.collect { cell ->
@@ -190,8 +192,7 @@ class App implements Runnable {
             def geom = roi.getGeometry()
             if (geom == null || geom.isEmpty()) { dropped++; return null }
 
-            def type = geom.getGeometryType()
-            if (type != 'Polygon' && type != 'MultiPolygon') {
+            if (!isWritableGeometry(geom)) {
                 // Flatten complex/nested geometry via buffer(0)
                 def fixedGeom = geom.buffer(0)
                 if (fixedGeom.isEmpty() || fixedGeom.getArea() <= 0) { dropped++; return null }
@@ -210,6 +211,24 @@ class App implements Runnable {
         if (dropped > 0)
             println "Dropped ${dropped} degenerate cell(s) produced by constrainCellOverlaps (zero area or non-polygon geometry)"
         return valid
+    }
+
+    /**
+    * Returns true if the geometry is safe to pass to QuPath's GeoJSON writer.
+    * The writer's writeCoordinates dispatches on type but recurses through a generic
+    * dispatcher for children, so a MultiPolygon whose children are not flat Polygons
+    * (e.g. nested MultiPolygons from GeometryCollection coercion) causes infinite recursion.
+    */
+    static boolean isWritableGeometry(org.locationtech.jts.geom.Geometry geom) {
+        def type = geom.getGeometryType()
+        if (type == 'Polygon') return true
+        if (type == 'MultiPolygon') {
+            for (int i = 0; i < geom.getNumGeometries(); i++) {
+                if (geom.getGeometryN(i).getGeometryType() != 'Polygon') return false
+            }
+            return true
+        }
+        return false
     }
 
     /**
