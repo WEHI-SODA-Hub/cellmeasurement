@@ -33,6 +33,7 @@ import qupath.lib.objects.PathObjectTools
 import qupath.lib.regions.ImagePlane
 import qupath.lib.regions.RegionRequest
 import qupath.lib.io.PathIO.GeoJsonExportOptions
+import qupath.lib.io.GsonTools
 import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.measurements.MeasurementList
 import qupath.lib.images.servers.PixelCalibration
@@ -1046,6 +1047,36 @@ class App implements Runnable {
 
         // Add the annotation object to the start of the pathObjects list
         pathObjects.add(0, annotation)
+
+        // Dry-run each object through the GeoJSON serialiser to catch any that would cause
+        // a StackOverflowError or other serialisation failure during export. Failed objects
+        // are logged and excluded from the export list rather than aborting the whole run.
+        // collectParallel returns a result map per object to avoid mutating shared state
+        // inside the closure (which causes a NoSuchMethodError with GPars Reference params).
+        println 'Testing serialisation...'
+        def gson = GsonTools.getInstance(false)
+        def results = GParsPool.withPool(threads) {
+            pathObjects.collectParallel { pathObject ->
+                try {
+                    gson.toJson(pathObject)
+                    return [ok: true, obj: pathObject]
+                } catch (Throwable t) {
+                    return [ok: false, obj: pathObject,
+                            type: pathObject.getROI()?.getGeometry()?.getGeometryType(),
+                            error: t.getMessage()]
+                }
+            }
+        }
+        results.findAll { !it.ok }.each {
+            println "Serialisation failed for object (${it.type}): ${it.error}"
+        }
+        int nFailed = results.count { !it.ok }
+        if (nFailed) {
+            println "Excluded ${nFailed} object(s) that failed serialisation"
+        } else {
+            println "All objects passed serialisation check"
+        }
+        pathObjects = results.findAll { it.ok }.collect { it.obj }
 
         println 'Exporting to GeoJSON...'
         QP.exportObjectsToGeoJson(
