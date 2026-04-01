@@ -1062,13 +1062,13 @@ class App implements Runnable {
                     return [ok: true, obj: pathObject]
                 } catch (Throwable t) {
                     return [ok: false, obj: pathObject,
-                            type: pathObject.getROI()?.getGeometry()?.getGeometryType(),
-                            error: t.getMessage()]
+                            roi: pathObject.getROI()?.toString(),
+                            error: t.toString()]
                 }
             }
         }
         results.findAll { !it.ok }.each {
-            println "Serialisation failed for object (${it.type}): ${it.error}"
+            println "Serialisation failed for object (${it.roi}): ${it.error}"
         }
         int nFailed = results.count { !it.ok }
         if (nFailed) {
