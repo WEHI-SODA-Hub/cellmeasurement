@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> This codebase is now deprecated. Please see [cellmeasurement-py](https://github.com/WEHI-SODA-Hub/cellmeasurement-py) for the Python rewrite
+
 # Cellmeasurement
 
 This is a Groovy application that extracts Regions of Interest (ROIs) from whole cell and nuclear mask images, matches them based on their centroids, calculates measurements and exports the cell objects to a GeoJSON file for importing into QuPath or other image viewer.
